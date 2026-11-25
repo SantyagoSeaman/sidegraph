@@ -8,6 +8,7 @@ from zipfile import ZipFile
 
 import pytest
 from packaging.requirements import Requirement
+from packaging.version import Version
 
 from sidegraph.portal import contract
 
@@ -21,8 +22,15 @@ _ROOT = Path(__file__).resolve().parents[2]
 def test_direct_portal_dependencies(name: str, floor: str) -> None:
     project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     requirements = {req.name: req for req in map(Requirement, project["dependencies"])}
-    assert requirements[name].specifier.contains(floor)
-    assert not requirements[name].specifier.contains(f"{floor}.dev0", prereleases=True)
+    specifier = requirements[name].specifier
+    pins = [spec.version for spec in specifier if spec.operator == "==" and "*" not in spec.version]
+    if pins:
+        # The released tree pins the whole closure exactly: the pin must sit at or above the floor.
+        assert specifier.contains(pins[0])
+        assert Version(pins[0]) >= Version(floor)
+    else:
+        assert specifier.contains(floor)
+        assert not specifier.contains(f"{floor}.dev0", prereleases=True)
     assert project["scripts"]["sidegraph-portal"] == "sidegraph.portal.__main__:main"
 
 

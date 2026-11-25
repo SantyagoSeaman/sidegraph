@@ -7,8 +7,9 @@ path, see [`getting-started/codex-setup.md`](../getting-started/codex-setup.md).
 
 Codex uses the same MCP server and hook entry points as Claude Code, with host-specific
 handling kept in Sidegraph's host layer. Its hooks support `additionalContext` on
-`SessionStart`. Plugin installation, update and hash-based trust metadata were checked on
-Codex CLI 0.162.1 on macOS ARM on 2026-10-15.
+`SessionStart`. Plugin installation and updates were checked on Codex CLI 0.162.1 on
+macOS ARM on 2026-10-15. An upgrade check on Codex CLI 0.171.0 measured the trust behavior
+described below.
 The version-specific primary references are the
 [plugin contract](https://developers.openai.com/plugins/build/plugins),
 [CLI reference](https://learn.chatgpt.com/docs/cli/reference) and
@@ -89,7 +90,20 @@ Project-scoped, at `.codex/hooks.json`:
 }
 ```
 
-Use the plugin path below for native hook wiring. The JSON above is the complete manual POSIX recipe. The reference explains its behavior. SessionStart supplies a map, SubagentStart introduces retrieval, and Stop can remind an interactive agent to capture learning. Sidegraph does not register a Codex file-read hook.
+Use the plugin path below for native hook wiring. The JSON above is the manual POSIX recipe for
+the standing hooks. SessionStart supplies a map, SubagentStart introduces retrieval, and Stop can
+remind an interactive agent to capture learning. Sidegraph does not register a Codex file-read
+hook. The plugin also runs a second SessionStart handler when a `SIDEGRAPH_BRIEFING_*` flag is
+`on`. See the [experimental briefing](../reference/hooks.md#sidegraph-session-briefing) for flags
+and manual wiring.
+
+Each Codex thread is its own Sidegraph session, keyed by its transcript name without the
+extension. Codex's umbrella `session_id` groups those threads. The 60-second duplicate
+check applies while the thread still owns the checkout's briefing mark. Alternating
+threads replace each other's mark and can each deliver a briefing. Threads that start close
+together can shorten the later thread's window enough to omit **What changed**.
+The briefing resolves relative store paths from the Codex checkout, while the standing hooks
+still honor an inherited `CLAUDE_PROJECT_DIR`.
 
 See the [full contract](../reference/codex-wiring.md#hooks-ga).
 
@@ -147,12 +161,10 @@ codex plugin marketplace add SantyagoSeaman/sidegraph
 codex plugin add sidegraph@sidegraph
 ```
 
-Start an interactive `codex` session in the repo and review the Sidegraph definitions
-(`SessionStart`, `Stop`, `SubagentStart`) through the startup warning or `/hooks`. Approve
-only definitions you have reviewed. Installation does not grant trust. Declining leaves
-those hooks inactive while the MCP registration remains available. Trust is per definition
-hash and covers the command selected for the host OS: a Windows-only command change needs
-review on Windows, without changing the POSIX approval.
+Start an interactive `codex` session in the repo. Use the startup warning or `/hooks` to
+review and approve the two `SessionStart` handlers, `Stop`, and `SubagentStart`.
+Installation requires separate approval for each hook. Declining leaves that hook inactive
+while the MCP registration remains available.
 
 **Updating an existing install.** After each Sidegraph release, run this in a terminal:
 
@@ -160,14 +172,12 @@ review on Windows, without changing the POSIX approval.
 codex plugin marketplace upgrade sidegraph
 ```
 
-Then start a new Codex session. On 0.162.1 the native upgrade updates the installed plugin
-without uninstalling; unchanged definitions keep their trust even when the cache root
-moves. A never-approved definition (observed at first install) is `untrusted`; a previously
-approved definition whose command changed is `modified` and needs review again through
-`/hooks`. Those status names are the
-observed 0.162.1 metadata. Updating never grants approval to a changed command. Each hook command names the plugin's
-Sidegraph version, so every release changes the commands and asks for review once; the marketplace
-update is also what moves the Sidegraph version. Update Codex itself if this command is unavailable.
+Then start a new Codex session. On Codex CLI 0.171.0, editing the hooks file marks all
+previously approved hooks in it `modified` because the trust hashes include the shared
+manifest contents. The upgrade that adds the briefing also lists its new handler as
+`untrusted`. Every Sidegraph release changes the version pinned in all four hook commands
+and prompts for review again. Review and approve all four through the startup warning or
+`/hooks`. Update Codex itself if the upgrade command is unavailable.
 
 **How the plugin launches.** The MCP server and every hook run `uvx --from sidegraph==X.Y.Z
 --python 3.13 <entry point>`, with `X.Y.Z` the plugin's version. See the

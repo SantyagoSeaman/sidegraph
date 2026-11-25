@@ -221,3 +221,11 @@ def test_the_command_reads_the_run_log_beside_the_store(tmp_path, capsys, monkey
     monkeypatch.setenv("SIDEGRAPH_TELEMETRY", "off")
     assert stats_main([]) == 0
     assert "HOOK RUNS" not in capsys.readouterr().out
+
+
+def test_session_briefing_runs_are_named() -> None:
+    rows = [RunRow(at_ms=1, hook="SessionBriefing", outcome="empty", elapsed_ms=40, detail="cold")]
+    stats = hook_run_stats(rows, cutoff_ms=0)
+    assert stats is not None
+    assert set(stats.hooks) == {"SessionBriefing"}
+    assert stats.hooks["SessionBriefing"].empty == {"cold": 1}

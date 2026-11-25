@@ -29,12 +29,14 @@ HOOKS = (
     "sidegraph-stop",
     "sidegraph-pre-tool-use",
     "sidegraph-subagent-start",
+    "sidegraph-session-briefing",
 )
 HOOK_FUNCTIONS = {
     "sidegraph-session-start": ("sidegraph.host.hooks", "session_start"),
     "sidegraph-stop": ("sidegraph.host.hooks", "stop"),
     "sidegraph-pre-tool-use": ("sidegraph.host.hooks", "pre_tool_use"),
     "sidegraph-subagent-start": ("sidegraph.host.subagent", "subagent_start"),
+    "sidegraph-session-briefing": ("sidegraph.host.briefing.core", "main"),
 }
 TIMEOUT_SECONDS = 30
 SAMPLE_SCRIPTS = ("sidegraph-session-start", "sidegraph-mcp", "sidegraph-stats")
@@ -258,3 +260,20 @@ def test_hook_without_arguments_still_reads_the_payload(sandbox: Sandbox) -> Non
     )
     assert process.returncode == 0, process.stderr
     assert process.stdout.strip().startswith("{")
+
+
+@pytest.mark.slow
+def test_session_briefing_accepts_repo_root_with_flags_off(sandbox: Sandbox) -> None:
+    before = sandbox.snapshot()
+    process = subprocess.run(
+        [str(_script_path("sidegraph-session-briefing")), "--repo-root"],
+        cwd=sandbox.repo,
+        env=sandbox.env,
+        input="{}",
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT_SECONDS,
+    )
+    assert process.returncode == 0, process.stderr
+    assert process.stdout == "{}\n"
+    assert sandbox.snapshot() == before

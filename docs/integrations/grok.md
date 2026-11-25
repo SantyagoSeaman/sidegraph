@@ -63,6 +63,8 @@ The plugin's Bash handler uses the same [reader prefilter](../reference/hooks.md
 as Claude Code. Grok has its own hooks file for
 the host variable and the timeouts.
 
+The `SIDEGRAPH_BRIEFING_*` flags have no effect on Grok Build.
+
 Grok names its tools differently from Claude Code, and the hook maps
 Grok's `read_file`, `grep`, `search_replace`, `write` and `spawn_subagent` to the tools it knows, and
 resolves a relative path against the directory the session started in. So a read, a search, an

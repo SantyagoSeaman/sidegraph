@@ -1,6 +1,6 @@
 [project]
 name = "sidegraph"
-version = "0.34.0"
+version = "0.35.0"
 description = "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -45,7 +45,7 @@ dependencies = [
     "cffi==2.1.1 ; platform_python_implementation != 'PyPy'",
     "click==8.5.1",
     "cryptography==50.0.2",
-    "cyclopts==5.5.2",
+    "cyclopts==5.5.3",
     "dnspython==2.9.2",
     "docstring-parser==0.18.0",
     "email-validator==2.4.0",
@@ -74,7 +74,7 @@ dependencies = [
     "more-itertools==11.2.1",
     "openapi-pydantic==0.6.0",
     "opentelemetry-api==1.45.2",
-    "packaging==26.3",
+    "packaging==26.4",
     "pathable==0.6.0",
     "platformdirs==4.14.8",
     "py-key-value-aio==0.4.6",
@@ -96,7 +96,7 @@ dependencies = [
     "rich==15.0.0",
     "rpds-py==2026.9.1",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
-    "sse-starlette==3.7.0",
+    "sse-starlette==3.7.1",
     "starlette==1.10.0",
     "typing-extensions==4.16.0",
     "typing-inspection==0.4.5",
@@ -119,6 +119,7 @@ sidegraph-session-start = "sidegraph.host.hooks:session_start"
 sidegraph-stop = "sidegraph.host.hooks:stop"
 sidegraph-pre-tool-use = "sidegraph.host.hooks:pre_tool_use"
 sidegraph-subagent-start = "sidegraph.host.subagent:subagent_start"
+sidegraph-session-briefing = "sidegraph.host.briefing.core:main"
 sidegraph-init = "sidegraph.cli:init_main"
 sidegraph-ratify = "sidegraph.cli:ratify_main"
 sidegraph-sync = "sidegraph.cli:sync_main"

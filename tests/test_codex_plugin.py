@@ -159,10 +159,16 @@ def test_codex_hooks_config_parses() -> None:
     for path in (p for p in (_HOOKS, _HOOKS_PUBLIC) if p.is_file()):
         hooks = _load_json(path)["hooks"]
         assert set(hooks.keys()) == {"SessionStart", "Stop", "SubagentStart"}
-        for event_hooks in hooks.values():
-            hook = event_hooks[0]["hooks"][0]
-            assert "git rev-parse --show-toplevel" in hook["command"]
-            assert "git rev-parse --show-cdup" in hook["commandWindows"]
+        for event, groups in hooks.items():
+            commands = [hook for group in groups for hook in group["hooks"]]
+            assert len(commands) == (2 if event == "SessionStart" else 1)
+            for hook in commands:
+                assert "git rev-parse --show-toplevel" in hook["command"]
+                assert "git rev-parse --show-cdup" in hook["commandWindows"]
+            if event == "SessionStart":
+                assert "sidegraph-session-start" in commands[0]["command"]
+                assert "sidegraph-session-briefing" in commands[1]["command"]
+                assert "sidegraph-session-briefing" in commands[1]["commandWindows"]
 
 
 def test_every_skill_has_openai_yaml_naming_sidegraph_dependency() -> None:

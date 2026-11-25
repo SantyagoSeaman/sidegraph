@@ -43,6 +43,8 @@ paths = [
   '''^design/reviews/2026-11-0[67]-[^/]+/''',
   # L2 bench results pin grading_key_sha256 and keys_sha256 (4 findings, all digests).
   '''^design/testing/benches/l2/results/[^/]+/result\.json$''',
+  # The frozen trap bank pins author evidence and every admitted task file.
+  '''^design/testing/benches/traps/bank\.json$''',
   # Saved L0 reports pin canonical_sha256, task_key_sha256 and other digests.
   '''^design/testing/benches/l0/results/[^/]+\.json$''',
 ]

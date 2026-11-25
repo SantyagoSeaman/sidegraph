@@ -334,3 +334,18 @@ def test_subagent_start_without_a_store_loads_nothing_heavy(tmp_path):
     assert out == {}
     assert heavy == []
     assert not (root / ".sidegraph").exists()
+
+
+def test_session_briefing_loads_nothing_heavy(tmp_path):
+    from sidegraph.host.briefing import FLAG_NAMES
+
+    root, store_dir = _repo(tmp_path)
+    _, heavy = _run(
+        "main",
+        {"session_id": "s1", "hook_event_name": "SessionStart", "source": "startup"},
+        root,
+        store_dir,
+        {flag: "on" for flag in FLAG_NAMES} | {"SIDEGRAPH_HOST": "claude"},
+        module="sidegraph.host.briefing.core",
+    )
+    assert heavy == []

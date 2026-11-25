@@ -43,6 +43,7 @@ CALLERS = {
     "engine/reader.py",
     "githooks.py",
     "gitio.py",
+    "host/briefing/git_files.py",
     "host/claude_settings.py",
     "host/hooks.py",
     "integrity.py",

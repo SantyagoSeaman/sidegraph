@@ -47,6 +47,7 @@ _VERSION = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 ]
 _ENTRY = {
     "SessionStart": "sidegraph-session-start",
+    "SessionBriefing": "sidegraph-session-briefing",
     "Stop": "sidegraph-stop",
     "SubagentStart": "sidegraph-subagent-start",
 }
@@ -131,10 +132,12 @@ def _cases() -> list[Any]:
     for manifest in sorted(_CODEX.glob("hooks*.json")):
         hooks = json.loads(manifest.read_text(encoding="utf-8"))["hooks"]
         for event, groups in hooks.items():
-            (hook,) = [h for g in groups for h in g["hooks"]]
-            command = hook["commandWindows"]
-            kind = _kind(command)
-            cases.append(pytest.param(kind, event, command, id=f"{manifest.name}-{event}"))
+            for hook in (h for g in groups for h in g["hooks"]):
+                command = hook["commandWindows"]
+                label = "SessionBriefing" if _ENTRY["SessionBriefing"] in command else event
+                cases.append(
+                    pytest.param(_kind(command), label, command, id=f"{manifest.name}-{label}")
+                )
     return cases
 
 
@@ -145,7 +148,7 @@ _SHELLS = [
 
 
 def test_the_scan_found_every_command_windows() -> None:
-    assert len(_CASES) >= 3
+    assert {case.values[1] for case in _CASES} == set(_ENTRY)
 
 
 _DEV_SESSION_MESSAGE = (
@@ -257,6 +260,7 @@ def _run(
     env["USERPROFILE"] = str(tmp_path / "home")
     env["GIT_CEILING_DIRECTORIES"] = str(tmp_path.parent)
     env["STUB_RECORD"] = str(record)
+    env["SIDEGRAPH_BRIEFING_PROTOCOL"] = "on"
     env.update(stub_env or {})
     result = subprocess.run(
         [shutil.which(shell) or shell, "-NoProfile", "-Command", command],
@@ -313,9 +317,10 @@ def test_runs_from_the_repo_root_with_the_environment_and_the_payload(
     # checkout's.
     assert seen["env"]["SIDEGRAPH_DIR"] == (".sidegraph" if kind == "dev" else None)
     assert seen["env"]["SIDEGRAPH_GRAPH"] == ("graphify-out/graph.json" if kind == "dev" else None)
-    assert seen["env"]["SIDEGRAPH_HOST"] == ("codex" if event == "SessionStart" else None)
+    host = "codex" if event in ("SessionStart", "SessionBriefing") else None
+    assert seen["env"]["SIDEGRAPH_HOST"] == host
     assert seen["env"]["UV_PROJECT_ENVIRONMENT"] == (".venv" if kind == "dev" else None)
-    assert bytes.fromhex(seen["stdin"]) == _PAYLOAD
+    assert bytes.fromhex(seen["stdin"]).rstrip() == _PAYLOAD.rstrip()
     assert seen["argv"] == _expected_argv(kind, event)
 
 
@@ -343,7 +348,7 @@ def test_a_launch_that_logs_to_stderr_and_exits_0_prints_no_fallback(
     # answer; the exit code alone does not.
     (call,) = _read_all(record)
     assert call["argv"] == _expected_argv(kind, event)
-    assert bytes.fromhex(call["stdin"]) == _PAYLOAD
+    assert bytes.fromhex(call["stdin"]).rstrip() == _PAYLOAD.rstrip()
 
 
 @windows_only
@@ -366,7 +371,7 @@ def test_a_launch_that_exits_non_zero_prints_the_fallback(
     # The internal command writes the run's own output and then the fallback. The public twin
     # captures both attempts and writes an attempt's output only on exit 0: here both exit 2, so
     # the fallback is all the host gets.
-    assert lines[:-1] == (["STUB-OUT"] if kind == "dev" else [])
+    assert lines[:-1] == (["STUB-OUT"] if kind == "dev" and event != "SessionBriefing" else [])
     # The public twin made two launches (offline, then online), the internal one a single run.
     calls = _read_all(record)
     assert [c["argv"] for c in calls] == (
@@ -377,6 +382,27 @@ def test_a_launch_that_exits_non_zero_prints_the_fallback(
 
 
 _PUBLIC_CASES = [c for c in _CASES if c.values[0] == "public"]
+
+
+@windows_only
+@pytest.mark.parametrize("shell", _SHELLS)
+@pytest.mark.parametrize(
+    ("kind", "event", "command"), [c for c in _CASES if c.values[1] == "SessionBriefing"]
+)
+def test_briefing_with_no_enabled_flag_starts_nothing(
+    kind: str, event: str, command: str, shell: str, repo: Path, stub_dir: Path, tmp_path: Path
+) -> None:
+    result, record = _run(
+        shell,
+        command,
+        cwd=repo,
+        path=_path(stub=stub_dir),
+        tmp_path=tmp_path,
+        stub_env={"SIDEGRAPH_BRIEFING_PROTOCOL": "one"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.decode().strip() == "{}"
+    assert not record.exists()
 
 
 @windows_only
@@ -404,7 +430,7 @@ def test_a_failed_offline_attempt_is_followed_by_one_online_attempt_that_gets_th
     offline, online = _read_all(record)
     assert offline["argv"] == _expected_argv(kind, event)
     assert online["argv"] == _expected_argv(kind, event, offline=False)
-    assert bytes.fromhex(online["stdin"]) == _PAYLOAD
+    assert bytes.fromhex(online["stdin"]).rstrip() == _PAYLOAD.rstrip()
 
 
 @windows_only

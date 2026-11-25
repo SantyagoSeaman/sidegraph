@@ -56,6 +56,7 @@ _PINNED_SESSION_MESSAGE = (
     "Sidegraph: the SessionStart hook could not start (uv, the first download of Sidegraph, or "
     "no network); run the hook command in a terminal to see the error"
 )
+_BRIEFING = "sidegraph-session-briefing"
 _RUNTIME_HOSTS = ("hooks", "grok")  # the manifest folders of the Claude and Grok hooks
 _ENTRY_GUARDS = {
     "sidegraph-session-start": _SESSION_GUARD,
@@ -74,6 +75,8 @@ def _runtime_session_message(command: str) -> str:
 def _event_guard(event: str, host: str, command: str) -> str:
     """The guard a ``host`` (the manifest's folder) ends ``event`` with."""
     runtime = host in _RUNTIME_HOSTS
+    if _BRIEFING in command:
+        return _RUNTIME_EMPTY_GUARD if runtime else _EMPTY_GUARD
     if event == "SessionStart":
         if not runtime:
             return _SESSION_GUARD
@@ -161,8 +164,10 @@ def _distinct(entries: list[Any]) -> list[Any]:
 
 _ENTRIES = _hook_entries()
 _DISTINCT = _distinct(_ENTRIES)
-_EMPTY_ANSWER = [e for e in _DISTINCT if e.values[0] in ("Stop", "PreToolUse", "SubagentStart")]
-_SESSION_START = [e for e in _DISTINCT if e.values[0] == "SessionStart"]
+_SESSION_START = [
+    e for e in _DISTINCT if e.values[0] == "SessionStart" and _BRIEFING not in e.values[1]
+]
+_EMPTY_ANSWER = [e for e in _DISTINCT if e not in _SESSION_START]
 
 
 def _script(path: Path, body: str) -> None:
@@ -209,7 +214,11 @@ def _run(
         cwd=cwd,
         # The Grok Bash pre-filter reads the payload and starts the hook only for a read command.
         input=_PAYLOAD,
-        env={"PATH": f"{bin_dir}:/bin:/usr/bin", "CLAUDE_PROJECT_DIR": str(project)},
+        env={
+            "PATH": f"{bin_dir}:/bin:/usr/bin",
+            "CLAUDE_PROJECT_DIR": str(project),
+            "SIDEGRAPH_BRIEFING_PROTOCOL": "on",
+        },
         capture_output=True,
         text=True,
         timeout=30,
@@ -239,7 +248,10 @@ def test_the_public_claude_and_grok_session_message_is_about_the_pinned_package(
     public = [
         command
         for event, command, host in (e.values for e in _ENTRIES)
-        if event == "SessionStart" and host in _RUNTIME_HOSTS and "uvx" in command
+        if event == "SessionStart"
+        and host in _RUNTIME_HOSTS
+        and "uvx" in command
+        and _BRIEFING not in command
     ]
     assert len(public) == 2
     for command in public:
@@ -254,7 +266,12 @@ def test_t1_every_hook_command_ends_with_the_guard_for_its_event(
 ) -> None:
     guard = _event_guard(event, host, command)
     assert command.count(guard) == 1
-    if command.startswith("p=$(cat); case "):
+    if command.startswith('case "${SIDEGRAPH_BRIEFING_'):
+        suffix = " ; }" if "uvx --from" in command else ""
+        assert command.endswith(guard + suffix + " ;; *) cat >/dev/null; echo '{}' ;; esac"), (
+            command
+        )
+    elif command.startswith("p=$(cat); case "):
         # The Bash pre-filter (Claude Code and Grok): the hook command inside it carries the
         # guard, and the filter answers `{}` itself for a command that reads no file.
         assert command.endswith(guard + " ; } ;; *) echo '{}' ;; esac"), command
@@ -304,7 +321,7 @@ def test_t3_a_missing_project_directory_is_caught(
     still ``cd``; the Claude and Grok ones anchor with ``--repo-root`` instead."""
     result = _run(shell, command, tmp_path, uv="answer", project=tmp_path / "no-such-dir")
     assert result.returncode == 0, (result.returncode, result.stderr)
-    if event == "SessionStart":
+    if event == "SessionStart" and _BRIEFING not in command:
         assert _system_message(result.stdout) == _session_message(host, command)
     else:
         assert result.stdout == "{}\n"
@@ -338,7 +355,7 @@ def test_uv_missing_answers_the_fallback(
     project.mkdir()
     result = _run(shell, command, tmp_path, uv="absent", project=project)
     assert result.returncode == 0, (result.returncode, result.stderr)
-    if event == "SessionStart":
+    if event == "SessionStart" and _BRIEFING not in command:
         assert _system_message(result.stdout) == _runtime_session_message(command)
     else:
         assert result.stdout == "{}\n"

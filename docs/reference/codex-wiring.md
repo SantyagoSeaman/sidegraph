@@ -94,7 +94,7 @@ environment, and exactly three initially untrusted hooks. The existing native ga
 `config/batchWrite` approval path wrote only their current hashes; all three then reported
 trusted. No project-trust write was needed for this plugin registry check.
 
-A local fixture upgrade changed the version and one skill body while keeping MCP/hook
+On 0.162.1, a local fixture upgrade changed the version and one skill body while keeping MCP/hook
 bytes unchanged. It updated the installed cache root without uninstalling and preserved
 all three hook hashes and trust without new writes. With the origin unavailable, upgrade
 exited 1 and retained the old version, installed bytes, enabled registration and trust.
@@ -111,6 +111,11 @@ acceptance on Windows and macOS is a separate check, run only when it is request
 release. For the desktop apps it is the release runbook's
 [desktop smoke](releasing.md#desktop-smoke-when-requested), whose results hold only for the
 operating system they were observed on.
+
+**Briefing upgrade check (Codex CLI 0.171.0).** Editing a single definition changed the
+shared manifest component of every hook hash in the file. On the upgrade that adds the
+briefing, the three approved standing hooks reported `modified` and the new handler
+reported `untrusted`. Review and approve all four through the startup warning or `/hooks`.
 
 Project trust and hook trust are separate. Project trust controls project-local settings;
 installing or enabling a plugin does not approve its hook hashes. A non-interactive

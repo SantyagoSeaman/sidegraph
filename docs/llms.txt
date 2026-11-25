@@ -71,7 +71,7 @@ and exact contracts; it does not replace their version-specific requirements.
 
 - [reference/mcp-tools.md](reference/mcp-tools.md) — MCP tool parameters, return shapes, write guards, and retrieval behavior
 - [reference/cli.md](reference/cli.md) — command flags, output, exit codes, import profiles, verification, and local diagnostics
-- [reference/hooks.md](reference/hooks.md) — sidegraph-session-start, sidegraph-stop, sidegraph-pre-tool-use, and sidegraph-subagent-start: env, JSON I/O, guarantees
+- [reference/hooks.md](reference/hooks.md) — sidegraph-session-start, sidegraph-stop, sidegraph-pre-tool-use, sidegraph-subagent-start, and sidegraph-session-briefing: env, JSON I/O, guarantees
 - [reference/git-bindings.md](reference/git-bindings.md) — commit trailers (candidate rules, comment-char handling, fail-open bounded stages, installation) and sidegraph-blame (trailer + provenance joins and output caps)
 - [reference/security-internals.md](reference/security-internals.md) — the exact runtime security rules: inspection history contents, redaction edge cases, input limits, content-free write diagnostics, Git baseline and bootstrap read validation
 - [privacy.md](privacy.md) — what Sidegraph keeps locally, its network activity (none from the runtime; uv's launches from the public repository, Graphify downloads, your agent's provider, optional Graphify semantic extraction), the local usage log and how to remove your data

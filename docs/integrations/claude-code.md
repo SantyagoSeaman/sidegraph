@@ -102,6 +102,12 @@ looks like.
 
 ## Environment variables
 
+Claude Code can receive an experimental SessionStart briefing alongside the project map.
+Its eight blocks are off by default and each has a `SIDEGRAPH_BRIEFING_*` flag that enables it
+when set to exactly `on`. A small pilot before release did not establish a reliable benefit.
+See the flag list, budgets, index gates and that result in the
+[hooks reference](../reference/hooks.md#sidegraph-session-briefing).
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `SIDEGRAPH_DIR` | `.sidegraph` | Path to the decision store directory (per-record files and, once packed, shard files; git-committed). Point it at a path inside the target repo, e.g. `.sidegraph`, so it can be committed as the repo's memory. `SIDEGRAPH_DB` is honored for back-compat (deprecated) — see [`reference/configuration.md`](../reference/configuration.md#store-path-resolution). |

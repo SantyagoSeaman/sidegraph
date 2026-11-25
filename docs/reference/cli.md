@@ -2,7 +2,7 @@
 
 > **Start here:** Use the section matching the command or payload you are checking. For everyday work, begin with the [documentation paths](../README.md). [Glossary](../concepts/glossary.md).
 
-23 console scripts are registered in `pyproject.toml` (`[project.scripts]`): eighteen
+24 console scripts are registered in `pyproject.toml` (`[project.scripts]`): eighteen
 commands documented on this page — fifteen in [`src/sidegraph/cli.py`](../../src/sidegraph/cli.py)
 (including `sidegraph-prepare-commit-msg`, which doubles as a git hook — see
 [`reference/git-bindings.md`](git-bindings.md) for its installation and mechanism) and the
@@ -10,9 +10,9 @@ guided `sidegraph-bootstrap` in
 [`src/sidegraph/bootstrap/cli.py`](../../src/sidegraph/bootstrap/cli.py) and ADR export in
 [`src/sidegraph/adr_cli.py`](../../src/sidegraph/adr_cli.py) and the Portal in
 [`src/sidegraph/portal/`](../../src/sidegraph/portal/) — plus the MCP server
-(`sidegraph-mcp`) and the four hook entry points (`sidegraph-session-start`,
-`sidegraph-stop`, `sidegraph-pre-tool-use`, `sidegraph-subagent-start`; see
-[`reference/hooks.md`](hooks.md)).
+(`sidegraph-mcp`) and the five hook entry points (`sidegraph-session-start`,
+`sidegraph-stop`, `sidegraph-pre-tool-use`, `sidegraph-subagent-start` and
+`sidegraph-session-briefing`). Details are in the [hooks reference](hooks.md).
 Commands with `--db` use the shared path precedence documented in
 [`configuration.md`](configuration.md): explicit flag, `SIDEGRAPH_DIR`, deprecated
 `SIDEGRAPH_DB`, an existing `.sidegraph/`, then `.sidegraph`. Commands that construct a

@@ -257,11 +257,14 @@ def _src_env_var_names() -> set[str]:
     the two viz template placeholders (``__SIDEGRAPH_VIS_JS__``, ``__SIDEGRAPH_GRAPH_JSON__``
     in viz/render.py and viz/template.html), which are string-substitution markers, not
     environment variables, and are correctly excluded from configuration.md.
+    The briefing flags are read through the registry rather than literals.
     """
+    from sidegraph.host.briefing import FLAG_NAMES
+
     names: set[str] = set()
     for path in (_ROOT / "src" / "sidegraph").rglob("*.py"):
         names.update(_ENV_READ_RE.findall(path.read_text(encoding="utf-8")))
-    return names
+    return names | set(FLAG_NAMES)
 
 
 _ENV_VAR_ROW_RE = re.compile(r"^\| `(SIDEGRAPH_[A-Z_]+)` \|")
@@ -1379,6 +1382,28 @@ def test_installation_has_scoped_host_install_update_and_permissions(
         assert "codex plugin update sidegraph@sidegraph" not in body
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "CHANGELOG.md",
+        "docs/getting-started/codex-setup.md",
+        "docs/integrations/codex.md",
+        "docs/reference/codex-wiring.md",
+        "docs/reference/hooks.md",
+        "docs/reference/host-wiring.md",
+    ],
+)
+def test_codex_briefing_upgrade_guides_review_all_four_hooks(path):
+    text = (_ROOT / path).read_text(encoding="utf-8")
+    if path == "CHANGELOG.md":
+        text = text.split("**Experimental SessionStart briefing for Claude Code and Codex.**", 1)[1]
+        text = text.split("\n\n", 1)[0]
+    assert any(
+        "0.171.0" in paragraph and "all four" in " ".join(paragraph.split())
+        for paragraph in text.split("\n\n")
+    ), path
+
+
 _MUSE_MARKETPLACE_COMMANDS = (
     "muse plugins marketplace add sidegraph https://github.com/SantyagoSeaman/sidegraph",
     "muse plugins install sidegraph@sidegraph",
@@ -1411,6 +1436,7 @@ _HOOK_ENTRY_POINTS = frozenset(
         "sidegraph-stop",
         "sidegraph-pre-tool-use",
         "sidegraph-subagent-start",
+        "sidegraph-session-briefing",
     }
 )
 

@@ -1516,6 +1516,7 @@ def test_collect_still_reads_a_store_link_that_stays_inside_the_repository(
 
 
 _CODEX_EVENTS = ("session_start", "stop", "subagent_start")
+_CODEX_ITEMS = (*_CODEX_EVENTS, "session_briefing")
 _CODEX_LIMITATION = (
     "A Codex trust entry goes stale when a hook command changes; Codex then lists the hook as "
     "modified and skips it. The published plugin's commands name the Sidegraph version, so every "
@@ -1566,12 +1567,16 @@ def test_codex_trust_reports_missing_events_and_manual_action(tmp_path, codex_wi
     _, collect, _, _ = codex_wiring
     config = tmp_path / "config.toml"
     config.write_text(
-        _trust_toml(_state_key("session_start"), _state_key("stop")), encoding="utf-8"
+        _trust_toml(
+            _state_key("session_start"), _state_key("session_start", slot="0:1"), _state_key("stop")
+        ),
+        encoding="utf-8",
     )
     report = collect()
     section = report["sections"][0]
     assert section["evidence"]["host_trust"]["items"] == {
         "session_start": "present",
+        "session_briefing": "present",
         "stop": "present",
         "subagent_start": "missing",
     }
@@ -1588,12 +1593,40 @@ def test_codex_trust_reports_missing_events_and_manual_action(tmp_path, codex_wi
 def test_codex_trust_reports_present_without_manual_action(tmp_path, codex_wiring):
     _, collect, _, _ = codex_wiring
     (tmp_path / "config.toml").write_text(
-        _trust_toml(*map(_state_key, _CODEX_EVENTS)), encoding="utf-8"
+        _trust_toml(*map(_state_key, _CODEX_EVENTS), _state_key("session_start", slot="0:1")),
+        encoding="utf-8",
     )
     report = collect()
     section = report["sections"][0]
-    assert section["evidence"]["host_trust"]["items"] == dict.fromkeys(_CODEX_EVENTS, "present")
+    assert section["evidence"]["host_trust"]["items"] == dict.fromkeys(_CODEX_ITEMS, "present")
     assert _CODEX_LIMITATION in section["limitations"]
+    assert _codex_recommendations(report) == []
+
+
+def test_codex_trust_reports_partial_session_start_approval_as_advisory(tmp_path, codex_wiring):
+    _, collect, _, _ = codex_wiring
+    config = tmp_path / "config.toml"
+    standing = _trust_toml(*map(_state_key, _CODEX_EVENTS))
+    config.write_text(standing, encoding="utf-8")
+
+    report = collect()
+    assert report["sections"][0]["evidence"]["host_trust"]["items"] == {
+        "session_start": "present",
+        "session_briefing": "missing",
+        "stop": "present",
+        "subagent_start": "present",
+    }
+    (rec,) = _codex_recommendations(report)
+    assert rec["priority"] == "advisory" and rec["argv"] == []
+    assert "/hooks" in rec["action"] and "optional SessionStart briefing handler" in rec["action"]
+
+    config.write_text(
+        standing + _trust_toml(_state_key("session_start", slot="0:1")), encoding="utf-8"
+    )
+    report = collect()
+    assert report["sections"][0]["evidence"]["host_trust"]["items"] == dict.fromkeys(
+        _CODEX_ITEMS, "present"
+    )
     assert _codex_recommendations(report) == []
 
 
@@ -1607,7 +1640,7 @@ def test_unavailable_codex_config_is_unknown(tmp_path, codex_wiring, config):
     section = report["sections"][0]
     trust = section["evidence"]["host_trust"]
     assert trust["status"] == "UNKNOWN" and trust["reason"]
-    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert trust["items"] == dict.fromkeys(_CODEX_ITEMS, "UNKNOWN")
     assert _CODEX_LIMITATION in section["limitations"]
     assert _codex_recommendations(report) == []
 
@@ -1626,7 +1659,7 @@ def test_project_local_codex_wiring_is_unknown(tmp_path, codex_wiring, manifest)
     report = collect()
     trust = report["sections"][0]["evidence"]["host_trust"]
     assert trust["status"] == "UNKNOWN" and "project" in trust["reason"]
-    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert trust["items"] == dict.fromkeys(_CODEX_ITEMS, "UNKNOWN")
     assert _codex_recommendations(report) == []
 
 
@@ -1668,6 +1701,7 @@ def test_codex_trust_checks_marketplace_and_slot_and_refuses_unknown_origin(tmp_
     (tmp_path / "config.toml").write_text(
         _trust_toml(
             _state_key("session_start"),
+            _state_key("session_start", slot="0:1"),
             _state_key("subagent_start"),
             _state_key("stop", marketplace="former"),
             _state_key("stop", slot="1:0"),
@@ -1677,6 +1711,7 @@ def test_codex_trust_checks_marketplace_and_slot_and_refuses_unknown_origin(tmp_
     trust = collect()["sections"][0]["evidence"]["host_trust"]
     assert trust["items"] == {
         "session_start": "present",
+        "session_briefing": "present",
         "stop": "missing",
         "subagent_start": "present",
     }
@@ -1684,7 +1719,7 @@ def test_codex_trust_checks_marketplace_and_slot_and_refuses_unknown_origin(tmp_
     shutil.copytree(plugin, outside)
     trust = collect(plugin_root=outside)["sections"][0]["evidence"]["host_trust"]
     assert trust["status"] == "UNKNOWN" and trust["reason"]
-    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert trust["items"] == dict.fromkeys(_CODEX_ITEMS, "UNKNOWN")
 
 
 def test_codex_trust_uses_declared_handler_positions(tmp_path, codex_wiring):
@@ -1729,7 +1764,7 @@ def test_codex_project_hook_read_stays_inside_project(tmp_path, codex_wiring, mo
     monkeypatch.setattr(collector, "_load_json", reject_unsafe_read)
     report = collect()
     trust = report["sections"][0]["evidence"]["host_trust"]
-    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert trust["items"] == dict.fromkeys(_CODEX_ITEMS, "UNKNOWN")
     assert "project" in trust["reason"]
     assert _codex_recommendations(report) == []
 
@@ -1747,8 +1782,11 @@ def test_codex_local_hook_check_distinguishes_unrelated_and_unreadable(
     )
     report = collect()
     assert report["sections"][0]["evidence"]["host_trust"]["items"] == dict.fromkeys(
-        _CODEX_EVENTS, "missing"
+        _CODEX_ITEMS, "missing"
     )
+    standing, briefing = _codex_recommendations(report)
+    assert standing["priority"] == "activation" and "session_briefing" not in standing["action"]
+    assert briefing["priority"] == "advisory" and "briefing handler" in briefing["action"]
     load_json = collector._load_json
     monkeypatch.setattr(
         collector,
@@ -1757,7 +1795,7 @@ def test_codex_local_hook_check_distinguishes_unrelated_and_unreadable(
     )
     report = collect()
     trust = report["sections"][0]["evidence"]["host_trust"]
-    assert trust["items"] == dict.fromkeys(_CODEX_EVENTS, "UNKNOWN")
+    assert trust["items"] == dict.fromkeys(_CODEX_ITEMS, "UNKNOWN")
     assert _codex_recommendations(report) == []
 
 
@@ -1802,11 +1840,15 @@ def test_codex_trust_resolves_home_alias_with_default_plugin_root(
     )
     config = tmp_path / "config.toml"
     config.write_text(
-        _trust_toml(_state_key("session_start"), _state_key("stop")), encoding="utf-8"
+        _trust_toml(
+            _state_key("session_start"), _state_key("session_start", slot="0:1"), _state_key("stop")
+        ),
+        encoding="utf-8",
     )
     report = collect(plugin_root=None)
     assert report["sections"][0]["evidence"]["host_trust"]["items"] == {
         "session_start": "present",
+        "session_briefing": "present",
         "stop": "present",
         "subagent_start": "missing",
     }

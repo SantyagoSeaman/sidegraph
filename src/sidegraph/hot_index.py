@@ -14,7 +14,9 @@ so the hook does nothing and prints ``{}``. The hot SQL (claim, meta read, event
 upsert) lives here as module constants that ``Store`` runs too, so the two cannot drift.
 
 see design/superpowers/specs/2026-10-03-hot-path-light-index-design.md (D2, D3) and
-design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1, D2, D5)
+design/superpowers/specs/2026-10-03-records-at-the-point-of-reading-design.md (D1, D2, D5).
+The briefing operations follow design/superpowers/specs/2026-11-20-sessionstart-briefing-design.md
+(D3–D5).
 """
 
 from __future__ import annotations
@@ -269,6 +271,52 @@ class HotIndex:
         with self._reading():
             row = self._conn.execute(GET_META_SQL, (key,)).fetchone()
         return row[0] if row else None
+
+    @contextlib.contextmanager
+    def snapshot(self) -> Iterator[None]:
+        """Keep one read view. See the SessionStart briefing design (D3)."""
+        with self._reading(), self._conn:
+            self._conn.execute("BEGIN")
+            yield
+
+    def rows(self, table: Literal["decisions", "facts", "entities"]) -> list[dict]:
+        """Read the JSON objects in one briefing table, skipping damaged rows (D5)."""
+        if table not in ("decisions", "facts", "entities"):
+            raise ValueError(f"Unsupported index table: {table}")
+        id_column = "entity_id" if table == "entities" else "id"
+        rows = []
+        # Let the per-row guard handle bad UTF-8 in either field.
+        sql = f"SELECT CAST({id_column} AS BLOB), CAST(data AS BLOB) FROM {table}"
+        with self._reading():
+            for raw_id, data in self._conn.execute(sql):
+                try:
+                    row_id = raw_id.decode("utf-8")
+                    payload = json.loads(data.decode("utf-8"))
+                    # JSON escapes can decode to lone surrogates, even in valid UTF-8 input.
+                    json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                except (AttributeError, ValueError):
+                    continue
+                if isinstance(payload, dict) and payload.get(id_column) == row_id:
+                    rows.append(payload)
+        return rows
+
+    def update_meta(self, key: str, decide: Callable[[str | None], str | None]) -> bool:
+        """Reserve the write before reading the key. See the SessionStart briefing design (D4)."""
+
+        def update(conn: sqlite3.Connection) -> bool:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(GET_META_SQL, (key,)).fetchone()
+            new = decide(row[0] if row else None)
+            if new is None:
+                return False
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, new),
+            )
+            return True
+
+        return self._in_transaction(update)
 
     def has_meta_now(self, key: str) -> bool:
         """Whether ``key`` is set, read without waiting for a lock. For naming why a run

@@ -7,6 +7,20 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.35.0] — 2026-11-25
+
+### Added
+
+- **Experimental SessionStart briefing for Claude Code and Codex.** A second SessionStart
+  handler emits up to eight blocks, each behind its own `SIDEGRAPH_BRIEFING_*` variable and
+  off by default. On Codex 0.171.0, the upgrade marks the three standing hooks `modified`
+  and the new briefing `untrusted`. Review and approve all four through `/hooks`.
+  A small Claude Code pilot before release did not establish a reliable reduction in mistakes,
+  so all eight blocks remain experimental and off. See the
+  [hooks reference](docs/reference/hooks.md#sidegraph-session-briefing).
+- **New console script `sidegraph-session-briefing`**, the briefing's SessionStart handler.
+  The health check reports its Codex approval as its own optional line.
+
 ## [0.34.0] — 2026-11-21
 
 ### Added
@@ -3626,7 +3640,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.31.0...v0.32.0

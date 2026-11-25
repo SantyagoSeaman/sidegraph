@@ -294,7 +294,7 @@ class HookRunStats(BaseModel):
 # The words the report may print from the log: the hooks that write a line and the causes they
 # write. Any other text in a log (a damaged or hand-edited line, a word a later version adds) is
 # counted under ``other`` and never printed.
-_LOG_HOOKS = ("PreToolUse", "SessionStart", "SubagentStart")
+_LOG_HOOKS = ("PreToolUse", "SessionStart", "SessionBriefing", "SubagentStart")
 _LOG_CAUSES = (
     "no-entity",
     "no-record",

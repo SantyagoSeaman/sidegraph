@@ -41,32 +41,30 @@ _MANIFESTS = sorted((_PLUGIN / "codex").glob("hooks*.json"))
 CODEX_CD = 'cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"'
 ENTRY = {
     "SessionStart": "sidegraph-session-start",
+    "SessionBriefing": "sidegraph-session-briefing",
     "Stop": "sidegraph-stop",
     "SubagentStart": "sidegraph-subagent-start",
 }
 
 
-def _commands(manifest: Path) -> dict[str, str]:
-    """event -> its one command, decoded from the JSON."""
+def _commands(manifest: Path, field: str = "command") -> dict[str, str]:
+    """Commands for each event and the separately gated SessionStart briefing."""
     hooks = json.loads(manifest.read_text(encoding="utf-8"))["hooks"]
     out: dict[str, str] = {}
     for event, groups in hooks.items():
-        commands = {hook["command"] for group in groups for hook in group["hooks"]}
-        assert len(commands) == 1, f"{manifest}: {event} carries {len(commands)} distinct commands"
-        (out[event],) = commands
+        for group in groups:
+            for hook in group["hooks"]:
+                command = hook[field]
+                label = "SessionBriefing" if ENTRY["SessionBriefing"] in command else event
+                assert label not in out, (manifest, label)
+                out[label] = command
     return out
 
 
 def _windows_commands(manifest: Path) -> dict[str, str]:
     """event -> its ``commandWindows``: what Codex runs on native Windows, instead of
     ``command``, through ``powershell.exe -NoProfile -Command`` (no ``sh`` is assumed there)."""
-    hooks = json.loads(manifest.read_text(encoding="utf-8"))["hooks"]
-    return {
-        event: hook["commandWindows"]
-        for event, groups in hooks.items()
-        for group in groups
-        for hook in group["hooks"]
-    }
+    return _commands(manifest, "commandWindows")
 
 
 _CODEX_SESSION_MESSAGE = (
@@ -156,9 +154,12 @@ def test_every_codex_hook_has_a_powershell_command_windows_on_the_pin(manifest: 
         # stderr, even at exit 0, and the online attempt would then run on a stdin the offline
         # one already read. With the exit code alone the online launch runs only when uv failed,
         # before the entry started, so the payload is still unread.
-        offline = f"$global:LASTEXITCODE = 1; $o = {_LAUNCH} --offline {ENTRY[event]} 2>$null; "
+        pipe = "$payload | " if event == "SessionBriefing" else ""
+        offline = (
+            f"$global:LASTEXITCODE = 1; $o = {pipe}{_LAUNCH} --offline {ENTRY[event]} 2>$null; "
+        )
         online = (
-            f"{{ $global:LASTEXITCODE = 1; $p = {_LAUNCH} {ENTRY[event]}; "
+            f"{{ $global:LASTEXITCODE = 1; $p = {pipe}{_LAUNCH} {ENTRY[event]}; "
             "if ($LASTEXITCODE -eq 0) { $p } else { "
         )
         assert offline + "if ($LASTEXITCODE -eq 0) { $o } else " + online in command, (
@@ -170,6 +171,7 @@ def test_every_codex_hook_has_a_powershell_command_windows_on_the_pin(manifest: 
         # one: a failed online attempt's output is discarded, not printed before the fallback.
         assert "-not $?" not in command, (event, command)
     assert "$env:SIDEGRAPH_HOST='codex'" in windows["SessionStart"]
+    assert "$env:SIDEGRAPH_HOST='codex'" in windows["SessionBriefing"]
     assert windows["SessionStart"].endswith(f"{{ '{_CODEX_SESSION_FALLBACK}' }} }}")
     for event in ("Stop", "SubagentStart"):
         assert windows[event].endswith("{ '{}' } }")
@@ -212,7 +214,11 @@ def test_a_codex_hook_runs_the_pin_from_the_repository_root_under_a_posix_shell(
         return subprocess.run(
             [shell, "-c", command],
             cwd=repo / "sub",
-            env={"HOME": str(tmp_path), "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"},
+            env={
+                "HOME": str(tmp_path),
+                "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+                "SIDEGRAPH_BRIEFING_PROTOCOL": "on",
+            },
             capture_output=True,
             text=True,
             timeout=_LAUNCH_TIMEOUT,
@@ -220,7 +226,7 @@ def test_a_codex_hook_runs_the_pin_from_the_repository_root_under_a_posix_shell(
         )
 
     ok = run({"uvx": 'printf \'%s|%s|%s\\n\' "$*" "$SIDEGRAPH_HOST" "$(pwd)"'})
-    host = "codex" if event == "SessionStart" else ""
+    host = "codex" if event in ("SessionStart", "SessionBriefing") else ""
     args = f"--from sidegraph=={_VERSION} --python 3.13 --offline {ENTRY[event]}"
     assert ok.returncode == 0, ok
     assert ok.stdout == f"{args}|{host}|{repo.resolve()}\n", ok
@@ -259,7 +265,11 @@ def test_a_codex_hook_goes_online_once_when_the_offline_attempt_fails(
         [shell, "-c", command],
         cwd=repo / "sub",
         input='{"hook_event_name":"x"}\n',
-        env={"HOME": str(tmp_path), "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"},
+        env={
+            "HOME": str(tmp_path),
+            "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "SIDEGRAPH_BRIEFING_PROTOCOL": "on",
+        },
         capture_output=True,
         text=True,
         timeout=_LAUNCH_TIMEOUT,

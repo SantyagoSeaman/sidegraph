@@ -126,6 +126,7 @@ class Rig:
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.tmp / "home"),
             "STUB_DIR": str(self.stub_dir),
+            "SIDEGRAPH_BRIEFING_PROTOCOL": "on",
             **stub_env,
         }
         return subprocess.run(
@@ -386,7 +387,7 @@ def test_when_both_attempts_fail_the_original_fallback_prints(
     done = rig.run(command, _SED_PAYLOAD, STUB_OFFLINE_EXIT="1", STUB_ONLINE_EXIT="3")
     assert done.returncode == 0, done.stderr
     assert len(rig.calls()) == 2
-    if event == "SessionStart":
+    if event == "SessionStart" and "sidegraph-session-briefing" not in command:
         message = _CODEX_SESSION_MESSAGE if host == "codex" else _SESSION_MESSAGE
         assert json.loads(done.stdout) == {"systemMessage": message}
     else:
@@ -416,7 +417,7 @@ def test_an_online_attempt_that_prints_and_then_fails_leaves_the_host_one_docume
     assert len(rig.calls()) == 2
     assert partial not in done.stdout
     (document,) = [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
-    if event == "SessionStart":
+    if event == "SessionStart" and "sidegraph-session-briefing" not in command:
         message = _CODEX_SESSION_MESSAGE if host == "codex" else _SESSION_MESSAGE
         assert document == {"systemMessage": message}
     else:

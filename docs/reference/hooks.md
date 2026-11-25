@@ -6,21 +6,23 @@ Choose the event you are diagnosing:
 
 | Event | Expected effect | First check |
 |---|---|---|
-| SessionStart | Gives the agent the project map and running version | Start a new session in the repository and inspect its opening context |
+| SessionStart | Gives the agent the project map and running version, plus an optional briefing on Claude Code and Codex | Start a new session in the repository and inspect its opening context |
 | PreToolUse | Adds relevant file records on supported reads or edits | Read a file with an accepted anchored record |
 | SubagentStart | Introduces retrieval to a new subagent | Ask the subagent to retrieve context for its task files |
 | Stop | Reminds a substantial session to propose durable learning | Codex and Grok require a person's interactive work; Claude requires two real prompts, so a headless one-prompt run is never nudged |
 
 A **record** is a stored decision or fact. A **domain** is a named project area. A **binding** connects a record to a target. A **proposed** record awaits a trust decision. A **drift** warning requests a content check. The event sections below give the exact JSON, gates and switches.
 
-The table describes the hook entry points. Hosts wire different subsets: Claude Code has all four, Codex has SessionStart/Stop/SubagentStart, Muse has SessionStart/SubagentStart, and Grok Build wires all four events but supplies its map through MCP instructions because its SessionStart and SubagentStart output is not passed to the model. Its PreToolUse output does reach the model. OpenCode uses explicit MCP tool calls.
+The table describes the hook events. Hosts wire different subsets: Claude Code has all four, Codex has SessionStart/Stop/SubagentStart, Muse has SessionStart/SubagentStart, and Grok Build wires all four events but supplies its map through MCP instructions because its SessionStart and SubagentStart output is not passed to the model. Its PreToolUse output does reach the model. OpenCode uses explicit MCP tool calls.
 
-Four hook entry points, registered as console scripts: `sidegraph-session-start`,
+Five hook entry points, registered as console scripts: `sidegraph-session-start`,
 `sidegraph-stop` and `sidegraph-pre-tool-use` in
-[`src/sidegraph/host/hooks.py`](../../src/sidegraph/host/hooks.py), and
+[`src/sidegraph/host/hooks.py`](../../src/sidegraph/host/hooks.py),
 `sidegraph-subagent-start` in
-[`src/sidegraph/host/subagent.py`](../../src/sidegraph/host/subagent.py). All four read a JSON
-payload from stdin and write a JSON response to stdout, per the Claude Code hooks contract. They
+[`src/sidegraph/host/subagent.py`](../../src/sidegraph/host/subagent.py), and
+`sidegraph-session-briefing` in [`src/sidegraph/host/briefing/core.py`](../../src/sidegraph/host/briefing/core.py).
+The hook programs read a JSON payload from stdin and write a JSON response to stdout, per the
+Claude Code hooks contract. They
 take one command-line option, `--repo-root`: it moves the process to the project root first
 (`CLAUDE_PROJECT_DIR` when the host sets it, else the git top-level of the working directory, else
 the working directory stays), so a hook launched from a subdirectory finds the project's store.
@@ -588,8 +590,13 @@ Two host limits apply at once, and the output is trimmed to whichever binds firs
   CJK costs one character but six bytes, and an emoji twelve.
 
 An ASCII map reaches the character limit first, a non-ASCII one the byte limit. The byte limit
-also covers a host that counts characters in UTF-16 units, where an emoji counts twice. Codex
-documents no limit. Both limits are checked on the printed output.
+also covers a host that counts characters in UTF-16 units, where an emoji counts twice.
+Both limits are checked on the printed output.
+
+The experimental briefing is a second `additionalContext` string with its own 9,500 UTF-16
+code-unit limit. Codex documents a default preview threshold of roughly 2,500 tokens for
+large hook output. Above that size Codex may deliver a preview of the briefing; what reaches
+the model in that case is not measured. [Codex hooks guide](https://learn.chatgpt.com/docs/hooks#large-hook-output)
 
 Under both limits the output is unchanged. Over either, these steps run in order until it fits:
 
@@ -726,6 +733,7 @@ The fixed stage labels identify the operation without carrying user data:
 | Hook | Stages |
 | --- | --- |
 | SessionStart | startup, launch, payload, store, session, telemetry, graph, sync, cache, render, drift, integrity, cleanup |
+| SessionBriefing | payload, store, index, mark, git, briefing, output, cleanup, or the name of a briefing block |
 | Stop | startup, payload, store, capture_peek, rearm, transcript, capture, drift, cleanup |
 | PreToolUse | payload, touch, index, delivery, claim, brief_journal, cleanup |
 | SubagentStart | payload, store, index, brief, cleanup |
@@ -748,6 +756,84 @@ file. An unavailable or replaced stderr descriptor disables reporting. A broken 
 sink is ignored; it must not change the hook's answer or process exit status. PreToolUse
 keeps an answer already printed if cleanup fails; SubagentStart retains its existing empty
 answer when cleanup fails before the brief can be returned.
+
+## `sidegraph-session-briefing`
+
+The Claude Code and Codex plugins run the experimental briefing as a second `SessionStart`
+handler that emits `additionalContext`. Each block is off by default. Set its flag to exactly
+`on` in the host's environment to enable it. With every flag unset the plugin drains the
+hook payload and prints `{}` without launching the briefing program.
+
+**No measured benefit.** Before this release the blocks were checked on trap tasks in
+Sidegraph's own repository: tasks that invite a mistake a stored record warns against. Rendered
+on 24 such tasks, most blocks rarely contained the record a task needed. A small Claude Code
+pilot of three blocks did not establish a reliable reduction in mistakes. All eight blocks remain
+experimental and off by default. Enable one to try it, not to prevent mistakes.
+
+On Codex 0.171.0, editing the hooks file marks all previously approved hooks in it
+`modified` because their trust hashes include the shared manifest contents. The upgrade
+that adds the briefing also lists the new handler as `untrusted`. Review and approve all
+four through the startup warning or `/hooks`.
+
+| Flag | Block | What it shows | Budget (UTF-16 units) |
+|---|---|---|---:|
+| `SIDEGRAPH_BRIEFING_PROTOCOL` | Protocol | When to ask memory and what to record | 900 |
+| `SIDEGRAPH_BRIEFING_FRAMING` | Framing | Counts and anchored examples of project memory | 1,200 |
+| `SIDEGRAPH_BRIEFING_WORKING_SET` | Working-set memory | Records for files changed on the branch, staged, unstaged or untracked | 4,000 |
+| `SIDEGRAPH_BRIEFING_ABANDONED` | Tried and abandoned | Rejected approaches for changed files, or the three most-recorded files | 2,000 |
+| `SIDEGRAPH_BRIEFING_CONSTRAINTS` | Constraints in force | Live accepted constraints | 3,000 |
+| `SIDEGRAPH_BRIEFING_CHANGES` | What changed | Accepted decisions added or replaced in the window | 2,400 |
+| `SIDEGRAPH_BRIEFING_THREADS` | Open threads | Drifted records on changed files, recent accepted decisions and the ratification queue count | 1,800 |
+| `SIDEGRAPH_BRIEFING_VOCABULARY` | Project vocabulary | Files and symbols with the most recorded memory | 900 |
+
+Blocks run in table order. The 9,500-unit cap counts line breaks, with astral characters
+taking two units. Each block keeps whole entries with its lookup line when shortened, or
+leaves out its text when the minimum useful block does not fit.
+
+The briefing reads the index as it finds it, in one snapshot. It prints `{}` for an unsupported
+host, a missing session key or store, an unusable index, or a cold index. A warm index must have
+an accepted decision with a deliverable binding to code. If the enabled blocks have nothing to
+say after those checks, the answer is also `{}`.
+
+The index keeps one local `briefing_session` row for the last session that passed the gates.
+While a session still owns the mark, another invocation for it within 60 seconds prints
+`{}`, except on `compact` and `clear`, which deliver again. The window starts at the
+previous session's start. On the first qualifying start, or if the mark write is refused,
+it starts 14 days before the newest eligible accepted decision or fact dated at or before
+the current time. An index with no qualifying date uses 14 days before the current time.
+
+Each Codex thread is its own Sidegraph session, keyed by the transcript name without the
+extension. Codex's umbrella `session_id` groups the threads. Alternating threads replace
+each other's checkout mark and can each deliver a briefing. Threads that start close
+together can shorten the next thread's window enough to omit **What changed**.
+
+The first session of a fresh clone generally has to wait for the next start to have a warm
+index. A project without a graph stays cold. The briefing can reflect the previous index
+after a pull until the map updates it. Expiry follows the wall clock. The tried-and-abandoned
+block shows the stored rationale from its start. A double registration can brief twice on
+compaction. A record can appear in two blocks and again when `PreToolUse` delivers memory for a
+file. A proposal-only store remains below the accepted-anchor gate.
+
+The headings and lookup lines below use placeholders for counts, paths, dates and record ids.
+
+| Block | Heading | Lookup lines |
+|---|---|---|
+| Protocol | `## Working with this project's memory` | Names the tools to ask and the situations in which to ask them. |
+| Framing | `## Sidegraph: this project's memory` | `Records it holds, for example (look up the first with retrieve_decisions(ids=["{id}"])):` |
+| Working-set memory | `## Memory for the files you are working on` | `More: get_task_context(files={files}).` and `{n} more changed files have recorded memory; next: get_task_context(files={files}).` |
+| Tried and abandoned | `## Tried and abandoned in the files you are working on` or `## Tried and abandoned in the most-recorded files` | `{n} more: get_task_context(files={files}).` |
+| Constraints in force | `## Constraints in force ({count})` | `{n} more: retrieve_decisions(kind="constraint").` |
+| What changed | `## Changed since the last session ({since:%Y-%m-%d %H:%M} UTC)` or `## Changed in the 14 days before the newest record (since {since:%Y-%m-%d})` | `{n} more: retrieve_decisions() lists the newest records.` |
+| Open threads | `## Open threads` | `{n} more: get_task_context(files={files}) tags them.` and `Awaiting ratification: {count} proposed records; list_proposed lists them.` |
+| Project vocabulary | `## Project vocabulary` | Lists files and symbols by their decision counts. |
+
+For manual POSIX wiring, use a Sidegraph version that includes the briefing and set the flags
+in the host's environment. Register the command as a second `SessionStart` handler. On Codex,
+set `SIDEGRAPH_HOST=codex` in both launches. The Codex plugin supplies the native Windows command.
+
+```sh
+case "${SIDEGRAPH_BRIEFING_PROTOCOL}${SIDEGRAPH_BRIEFING_FRAMING}${SIDEGRAPH_BRIEFING_WORKING_SET}${SIDEGRAPH_BRIEFING_ABANDONED}${SIDEGRAPH_BRIEFING_CONSTRAINTS}${SIDEGRAPH_BRIEFING_CHANGES}${SIDEGRAPH_BRIEFING_THREADS}${SIDEGRAPH_BRIEFING_VOCABULARY}" in *on*) p=$(cat); o=$(printf '%s\n' "$p" | SIDEGRAPH_HOST=claude uvx --from sidegraph==X.Y.Z --python 3.13 --offline sidegraph-session-briefing --repo-root 2>/dev/null) && printf '%s\n' "$o" || { o=$(printf '%s\n' "$p" | SIDEGRAPH_HOST=claude uvx --from sidegraph==X.Y.Z --python 3.13 sidegraph-session-briefing --repo-root) && printf '%s\n' "$o" || echo '{}' ; } ;; *) cat >/dev/null; echo '{}' ;; esac
+```
 
 ## `sidegraph-stop`
 
@@ -1466,14 +1552,14 @@ There is no matcher and no one-shot marker: the host fires the event once per su
 every subagent gets the brief once. The hook never sets a `systemMessage`; the command guard on
 this event answers `{}`, so a start failure never puts a message in front of a subagent.
 
-**Codex** users approve the new hook once: Codex records trust per hook definition (see
-[`integrations/codex.md`](../integrations/codex.md#plugin-install-path)). **Muse** users approve
-it with `muse plugins approve sidegraph`.
+**Codex** users review and approve new or modified definitions through the startup warning
+or `/hooks`. See the [Codex plugin install and upgrade instructions](../integrations/codex.md#plugin-install-path).
+**Muse** users approve it with `muse plugins approve sidegraph`.
 
 ## The hook run log
 
-`sidegraph-pre-tool-use`, `sidegraph-session-start` and `sidegraph-subagent-start` append one line
-per run to `.sidegraph/index.db-hooks.log`, after they have printed their answer:
+`sidegraph-pre-tool-use`, `sidegraph-session-start`, `sidegraph-session-briefing` and
+`sidegraph-subagent-start` append one line per qualifying run to `.sidegraph/index.db-hooks.log` after printing their answer.
 
 ```
 <epoch ms> <hook> <outcome> <elapsed ms>
@@ -1484,12 +1570,12 @@ Some lines carry a fifth field. On an `empty` line it is the cause:
 | Cause | Written by | Meaning |
 |---|---|---|
 | `no-entity` | PreToolUse | no file the call names has an anchored entity |
-| `no-record` | PreToolUse, SubagentStart | an anchor is there, and no record that would be handed over |
+| `no-record` | PreToolUse, SubagentStart, SessionBriefing | an anchor is there, and no record that would be handed over. SessionBriefing uses this cause when no accepted decision has a deliverable anchor or its enabled blocks render nothing. |
 | `no-index` | PreToolUse, SubagentStart | delivery found a store without an index |
-| `cold` | PreToolUse, SubagentStart | a record that would have surfaced was left out while its anchor awaited sync. PreToolUse can deliver eligible records by exact path in this state |
+| `cold` | PreToolUse, SubagentStart, SessionBriefing | a record that would have surfaced was left out while its anchor awaited sync. PreToolUse can deliver eligible records by exact path in this state. SessionBriefing uses this cause whenever the index is cold. |
 | `repeat` | PreToolUse | every file with records was already delivered to this agent |
 | `cap` | PreToolUse | a file with records was refused because its allowance is full |
-| `duplicate` | SessionStart | a second notice for the same session within 60 seconds, with matching sources or either source absent |
+| `duplicate` | SessionStart, SessionBriefing | a second notice for the same session within 60 seconds. SessionStart counts it only with matching sources or either source absent; SessionBriefing counts any source but `compact` and `clear`. |
 | `unknown` | PreToolUse, SubagentStart | the cause was not read: another process held the index lock, and a hook does not wait to learn why it had nothing to deliver |
 
 One cause per run; when several apply, the one furthest along is written (`cap`, then
@@ -1519,6 +1605,8 @@ The log is written only next to a store. `sidegraph-pre-tool-use` and `sidegraph
 count a run when its delivery used the index, lost it to a lock, or found it missing.
 Delivery switched off, touch-only recording and early exits before the delivery attempt leave
 no line. Other refusals such as a newer format, a symlink or a corrupt index leave no run-log line.
+`sidegraph-session-briefing` writes a line only for a run whose delivery opened the index and
+used it or lost it to a lock.
 `sidegraph-session-start` opens the whole store, so it also
 logs `error` when the store refuses to open, except for a store that needs a newer Sidegraph,
 which it leaves as it was.
@@ -1536,7 +1624,8 @@ block).
 
 The Claude Code and Grok Build plugins wire all four hooks the same way: each command runs
 `uvx --from sidegraph==X.Y.Z --python 3.13 <entry point> --repo-root` and ends with the command
-guard. The launch first runs with `--offline` and goes online only when that fails (see
+guard. The briefing handler uses the same launch inside a shell `case` on its eight flags.
+The launch first runs with `--offline` and goes online only when that fails (see
 [launcher details](host-wiring.md#plugin-launchers)). No `cd` prefix, no `UV_*` variable and no `@main` resolution is involved, so the Sidegraph
 version changes only when the plugin updates. The commands set no `SIDEGRAPH_DIR` or
 `SIDEGRAPH_GRAPH`: a value exported in your shell steers the plugin as it steers the CLIs, and

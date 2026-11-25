@@ -254,24 +254,27 @@ def _load_json(path: Path) -> tuple[dict[str, Any] | None, str]:
 def _codex_trust(plugin_path: Path, project: Path, config_path: Path) -> dict[str, Any]:
     hook_name = re.compile(
         r"(?:^\s*|\b(?:uv run|uvx)\s+(?:[^;&|\n]*\s+)?)"
-        r"sidegraph-(session-start|stop|subagent-start|pre-tool-use)(?![\w-])"
+        r"sidegraph-(session-start|session-briefing|stop|subagent-start|pre-tool-use)(?![\w-])"
     )
 
-    def hook_slots(manifest: dict[str, Any]) -> dict[str, list[tuple[int, int]]]:
-        return {
-            re.sub(r"(?<!^)(?=[A-Z])", "_", event).lower(): [
-                (i, j)
-                for i, group in enumerate(groups)
-                for j, hook in enumerate(group["hooks"])
-                if any(hook_name.search(hook.get(key, "")) for key in ("command", "commandWindows"))
-            ]
-            for event, groups in manifest["hooks"].items()
-        }
+    def hook_slots(manifest: dict[str, Any]) -> dict[str, list[str]]:
+        slots: dict[str, list[str]] = {}
+        for event, groups in manifest["hooks"].items():
+            event = re.sub(r"(?<!^)(?=[A-Z])", "_", event).lower()
+            slots.setdefault(event, [])
+            for i, group in enumerate(groups):
+                for j, hook in enumerate(group["hooks"]):
+                    commands = (hook.get(key, "") for key in ("command", "commandWindows"))
+                    match = next(filter(None, map(hook_name.search, commands)), None)
+                    if match:
+                        label = "session_briefing" if match[1] == "session-briefing" else event
+                        slots.setdefault(label, []).append(f"{event}:{i}:{j}")
+        return slots
 
     try:
         slots = hook_slots(_load_json(plugin_path / "codex/hooks.json")[0] or {})
     except (AttributeError, KeyError, TypeError):
-        slots = dict.fromkeys(("session_start", "stop", "subagent_start"), [(0, 0)])
+        slots = {event: [f"{event}:0:0"] for event in ("session_start", "stop", "subagent_start")}
     unknown = {"status": "UNKNOWN", "items": dict.fromkeys(slots, "UNKNOWN")}
     try:
         unknown["reason"] = "project-local Codex hook origin could not be determined"
@@ -292,12 +295,12 @@ def _codex_trust(plugin_path: Path, project: Path, config_path: Path) -> dict[st
         state = config.get("hooks", {}).get("state", {})
         prefix = f"sidegraph@{marketplace.name}:codex/hooks.json"
         items = {}
-        for event, indexes in slots.items():
-            if indexes:
-                keys = [f"{prefix}:{event}:{i}:{j}" for i, j in indexes]
+        for label, addresses in slots.items():
+            if addresses:
+                keys = [f"{prefix}:{address}" for address in addresses]
                 hashes = (state.get(key, {}).get("trusted_hash") for key in keys)
                 present = all(isinstance(value, str) for value in hashes)
-                items[event] = "present" if present else "missing"
+                items[label] = "present" if present else "missing"
         return {"status": "available", "items": items}
     except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
         return unknown
@@ -758,12 +761,28 @@ def collect(
             "a stale one: after an update or a wiring change, open /hooks once."
         )
         states = trust["items"]
-        missing = ", ".join(event for event, status in states.items() if status == "missing")
+        missing = ", ".join(
+            event
+            for event, status in states.items()
+            if status == "missing" and event != "session_briefing"
+        )
         if missing:
             action = f"In Codex, open /hooks and trust Sidegraph's hooks: {missing}."
             reason = "Codex records no trust for these Sidegraph hooks, so it does not run them."
             recommendations.append(
                 _recommendation("activation", action, reason, f"codex_config={config}", None, root)
+            )
+        if states.get("session_briefing") == "missing":
+            recommendations.append(
+                _recommendation(
+                    "advisory",
+                    "In Codex, open /hooks and approve Sidegraph's optional SessionStart "
+                    "briefing handler if you use it.",
+                    "The experimental briefing requires its own approval.",
+                    f"codex_config={config} (SessionStart briefing)",
+                    None,
+                    root,
+                )
             )
     if reach_data.get("project_only") or reach_data.get("nested_off"):
         recommendations.append(
@@ -1241,7 +1260,7 @@ def collect(
         if not stable or any(section["status"] == "warning" for section in sections)
         else "OK"
     )
-    order = ("activation", "integrity", "freshness", "curation", "usage")
+    order = ("activation", "integrity", "freshness", "curation", "usage", "advisory")
     deduplicated: dict[tuple[tuple[str, ...], str], dict[str, Any]] = {}
     for item in recommendations:
         key = (tuple(item["argv"]), item["scope"])

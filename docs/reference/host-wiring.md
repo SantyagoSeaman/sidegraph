@@ -4,7 +4,7 @@
 
 ## Hooks in detail
 
-The four hooks are console scripts. See the [host environment settings](../integrations/claude-code.md#environment-variables) and the [complete variable reference](configuration.md#environment-variables) for their configuration.
+The five hook programs are console scripts. See the [host environment settings](../integrations/claude-code.md#environment-variables) and the [complete variable reference](configuration.md#environment-variables) for their configuration.
 
 ### `SessionStart` — `sidegraph-session-start`
 
@@ -184,7 +184,7 @@ counts and the exact output are in the [hooks reference](hooks.md#sidegraph-suba
 
 ### Silent degradation
 
-All four hooks are written to **never crash the session** and never block a tool call. Any
+All five hook programs are written to **never crash the session** and never block a tool call. Any
 exception inside `session_start` prints `{}` (Claude Code proceeds with no injected context),
 except that a store which cannot be opened prints a `systemMessage` naming the cause and the fix
 (and a model line saying memory tools will fail) instead, and a lock another process holds still
@@ -237,14 +237,21 @@ the online launch, captured the same way and written only when that exit code is
 that failed too, the fallback alone. It resets `$LASTEXITCODE` to 1 before each launch, so the 0
 that `git rev-parse` left cannot pass for a `uvx` that never ran, and it decides on the exit code
 alone: Windows PowerShell 5.1 sets `$?` to false after a native program writes to a redirected
-stderr, even at exit 0, and uv logs there. PowerShell does not buffer stdin for a second
-attempt (5.1 mangles non-ASCII text piped to a native command), so the online attempt reads
+stderr, even at exit 0, and uv logs there. The map, Stop, and SubagentStart PowerShell commands
+pass stdin directly, so the online attempt reads
 whatever the offline one left. With the exit code alone that is the whole payload in practice:
 the online attempt runs only when uv failed, and uv fails before it starts the entry, so stdin is
 unread. An entry that starts and then exits non-zero has consumed it, and the online attempt
 then gets an empty stdin and answers `{}`. Muse's adapter runs the two argument lists in turn
 under its one time budget. The MCP server starts once per session, so its launch keeps the plain
 form.
+
+When a `SIDEGRAPH_BRIEFING_*` flag is set to `on`, the Codex plugin runs a second
+`SessionStart` handler. Its PowerShell command reads the UTF-8 payload once and passes it
+to either launch. On Codex 0.171.0, editing the hooks file marks all previously approved
+hooks in it `modified`. Upgrading to the briefing also lists the new handler as `untrusted`.
+Review and approve all four through the startup warning or `/hooks`.
+See the [briefing flags](hooks.md#sidegraph-session-briefing).
 
 **Bash is one entry.** Claude Code starts a hook for every `if` entry whose rule matches a Bash
 command, and for all of them when it cannot split the command into subcommands (a quoted

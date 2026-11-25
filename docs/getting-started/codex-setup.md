@@ -34,9 +34,10 @@ only when you update the plugin. See [pinned releases](installation.md#mutable-d
 These are shell commands, not slash commands typed inside a Codex session. The marketplace
 source takes `owner/repo[@ref]`, a local path or a Git URL.
 
-Installs the MCP server, the `SessionStart`/`Stop`/`SubagentStart` hooks, and all 14 skills in one step,
-using the store at `.sidegraph/` and the graph at `graphify-out/graph.json` by default.
-The MCP server and the three hooks run `uvx --from sidegraph==X.Y.Z --python 3.13 <entry point>`
+Installs the MCP server, four hook handlers (two for `SessionStart`, one for `Stop` and
+one for `SubagentStart`), and all 14 skills in one step. The default store and graph paths
+are `.sidegraph/` and `graphify-out/graph.json`. The MCP server and all four handlers run
+`uvx --from sidegraph==X.Y.Z --python 3.13 <entry point>`
 under the hood, with `X.Y.Z` the plugin's version; that PyPI package pins every one of its
 dependencies. See
 [the plugin install path](../integrations/codex.md#plugin-install-path) for exactly what
@@ -49,12 +50,9 @@ release run `uv tool upgrade sidegraph`. SessionStart says when it differs from 
 ([`path-skew`](../guides/troubleshooting.md#path-skew)), and the plugin's skills ignore it
 ([running the CLIs beside the plugin](../reference/cli.md#running-the-clis-beside-the-plugin)).
 
-Trust the hooks: start an interactive `codex` session in the repo. Review the new Sidegraph
-definitions (`SessionStart`, `Stop`, `SubagentStart`) through Codex's startup warning or
-`/hooks`, then approve them. Installation alone does not grant trust. Skip or decline and
-the MCP registration remains available, but automatic context, the capture reminder and
-the subagent brief stay silent. A new or changed hook definition needs a fresh review, and the version is part of each hook
-command, so every plugin update asks once.
+Start an interactive `codex` session in the repo. Use the startup warning or `/hooks` to
+review and approve all four Sidegraph handlers. Installation requires separate approval
+for each handler. Declining leaves that handler inactive while the MCP server remains available.
 
 Skip to [Verify](#verify) once installed.
 
@@ -66,10 +64,11 @@ After each Sidegraph release, run this in a terminal, then start a new Codex ses
 codex plugin marketplace upgrade sidegraph
 ```
 
-On Codex CLI 0.162.1 this refreshes the marketplace and the installed plugin without an
-uninstall/reinstall. Unchanged hook definitions keep their approval even when the cache path
-changes. Review new or changed definitions through the startup warning or `/hooks`; updating
-does not approve them for you. If your Codex version lacks this command, update Codex first.
+On Codex 0.171.0, editing the hooks file marks all previously approved hooks in it
+`modified`. The upgrade that adds the briefing also lists the new handler as `untrusted`.
+Sidegraph releases change the version pinned in every hook command. After upgrading,
+review and approve all four through the startup warning or `/hooks`. If your Codex version
+lacks the marketplace upgrade command, update Codex first.
 
 Keep the optional CLI on your `PATH` updated separately as described above. See the
 [integration details](../integrations/codex.md#plugin-install-path) for tested behavior

@@ -483,6 +483,7 @@ setup, scripted/CI use, and the three deliberately human-run jobs (`sidegraph-im
 | `sidegraph-stop` | `Stop` hook — nudges the agent to distill decisions. |
 | `sidegraph-pre-tool-use` | `PreToolUse` hook — hands the agent the records anchored to a file when it reads or edits it (`Read`, `Grep`, `Edit`, `Write`, and [supported Bash reads](../reference/hooks.md#bash-lines)). |
 | `sidegraph-subagent-start` | `SubagentStart` hook — tells a starting subagent that decision memory exists and how to ask it. |
+| `sidegraph-session-briefing` | Second `SessionStart` handler for Claude Code and Codex. Prints the experimental briefing when a `SIDEGRAPH_BRIEFING_*` flag is `on`, else `{}`. |
 | `sidegraph-bootstrap` | Guided CLI — scan one of seven supported ADR/spec profiles, preview and review candidates, write only after confirmation, verify anchors/host integration, and prove production retrieval. |
 | `sidegraph-init` | CLI — bootstrap `.sidegraph/` in a repo: create the store, check for the graph, ask (in a terminal) whether to install the git hook that keeps the graph fresh (`--hooks`, `--no-hooks`, `--remove-hooks`), print the plugin install path (and the no-plugin `claude mcp add` alternative). |
 | `sidegraph-ratify` | CLI — review/accept/drop proposed decisions, facts, and domains. |

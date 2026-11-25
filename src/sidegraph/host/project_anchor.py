@@ -1,7 +1,7 @@
 """Move a host entry point to the project root, which the plugin manifests ask for with a flag.
 
-The flag is ``--repo-root``. Shared by ``sidegraph-mcp`` and the four hook entries, so there is
-one copy. Standard library only, through ``gitenv``: the hook hot path imports this on every call
+The flag is ``--repo-root``. ``sidegraph-mcp`` and the five hook programs share one copy.
+Standard library only, through ``gitenv``: the hook hot path imports this on every call
 and never loads pydantic for the git top level.
 see design/superpowers/specs/2026-11-03-claude-plugin-bundled-runtime-design.md (§4.6),
 design/superpowers/specs/2026-10-13-sh-free-plugin-launch-design.md (D3) and
@@ -31,15 +31,15 @@ def take_repo_root_flag(argv: list[str]) -> bool:
     return present
 
 
-def anchor_to_project() -> None:
+def anchor_to_project(*, honor_claude_project_dir: bool = True) -> None:
     """Move the process to the project root.
 
-    ``CLAUDE_PROJECT_DIR`` wins when it is set, non-blank and an existing directory (what the
+    ``CLAUDE_PROJECT_DIR`` wins when honored, set, non-blank and an existing directory (what the
     old ``cd "${CLAUDE_PROJECT_DIR}"`` launcher did). Otherwise the git top-level of the cwd
     applies (what the old Codex ``cd "$(git rev-parse --show-toplevel)"`` did), and outside a
     repository nothing moves. Anchoring never raises: the entry runs wherever it is.
     """
-    project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    project = os.environ.get("CLAUDE_PROJECT_DIR", "").strip() if honor_claude_project_dir else ""
     try:
         target = Path(project) if project and Path(project).is_dir() else _git_top_level()
         os.chdir(target)

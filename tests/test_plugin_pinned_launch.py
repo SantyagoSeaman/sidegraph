@@ -57,6 +57,13 @@ _SESSION_GUARD = (
     "error\"}'"
 )
 _EMPTY_GUARD = "echo '{}'"
+_BRIEFING = "sidegraph-session-briefing"
+_BRIEFING_CASE = (
+    'case "${SIDEGRAPH_BRIEFING_PROTOCOL}${SIDEGRAPH_BRIEFING_FRAMING}'
+    "${SIDEGRAPH_BRIEFING_WORKING_SET}${SIDEGRAPH_BRIEFING_ABANDONED}"
+    "${SIDEGRAPH_BRIEFING_CONSTRAINTS}${SIDEGRAPH_BRIEFING_CHANGES}"
+    '${SIDEGRAPH_BRIEFING_THREADS}${SIDEGRAPH_BRIEFING_VOCABULARY}" in *on*) '
+)
 # The Bash pre-filter, on Claude and Grok alike: a read word after a non-identifier character, or
 # after a JSON whitespace escape, and followed by a space, a JSON tab or carriage-return escape,
 # a quote or a JSON-escaped double quote. Never a bare substring.
@@ -106,14 +113,15 @@ def _load(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
-def _body(host: str, event: str) -> str:
+def _body(host: str, event: str, *, briefing: bool = False) -> str:
     """The offline-first launch of ``event`` on ``host`` (``claude`` or ``grok``): ``--offline``
     first with its output held back, the online launch (output held back too) when that fails, then
     the fallback."""
-    guard = _SESSION_GUARD if event == "SessionStart" else _EMPTY_GUARD
+    guard = _SESSION_GUARD if event == "SessionStart" and not briefing else _EMPTY_GUARD
+    entry = _BRIEFING if briefing else _ENTRY[event]
     prefix = f"SIDEGRAPH_HOST={host} "
-    off = f"{prefix}{_LAUNCH} --offline {_ENTRY[event]} --repo-root"
-    on = f"{prefix}{_LAUNCH} {_ENTRY[event]} --repo-root"
+    off = f"{prefix}{_LAUNCH} --offline {entry} --repo-root"
+    on = f"{prefix}{_LAUNCH} {entry} --repo-root"
     return (
         f"o=$(printf '%s\\n' \"$p\" | {off} 2>/dev/null) && printf '%s\\n' \"$o\" || "
         f"{{ o=$(printf '%s\\n' \"$p\" | {on}) && printf '%s\\n' \"$o\" || {guard} ; }}"
@@ -123,6 +131,14 @@ def _body(host: str, event: str) -> str:
 def _expected(host: str, event: str) -> str:
     """The public hook command for ``host`` (``claude`` or ``grok``) on ``event``."""
     return f"p=$(cat); {_body(host, event)}"
+
+
+def _briefing(host: str) -> str:
+    return (
+        _BRIEFING_CASE
+        + f"p=$(cat); {_body(host, 'SessionStart', briefing=True)}"
+        + (" ;; *) cat >/dev/null; echo '{}' ;; esac")
+    )
 
 
 def _bash_filter(host: str) -> str:
@@ -168,13 +184,20 @@ def test_the_claude_mcp_entry_launches_the_pin() -> None:
 
 def test_every_claude_hook_command_launches_the_pin() -> None:
     for event, matcher, command in _commands(_CLAUDE_HOOKS):
-        want = _bash_filter("claude") if matcher == "Bash" else _expected("claude", event)
+        if _BRIEFING in command:
+            want = _briefing("claude")
+        elif matcher == "Bash":
+            want = _bash_filter("claude")
+        else:
+            want = _expected("claude", event)
         assert command == want, (event, command)
 
 
 def test_claude_commands_keep_their_shell_fallback_and_the_reworded_session_message() -> None:
     for event, _matcher, command in _commands(_CLAUDE_HOOKS):
-        guard = _SESSION_GUARD if event == "SessionStart" else _EMPTY_GUARD
+        guard = (
+            _SESSION_GUARD if event == "SessionStart" and _BRIEFING not in command else _EMPTY_GUARD
+        )
         assert f" || {guard} ; }}" in command, command
     session = next(c for e, _m, c in _commands(_CLAUDE_HOOKS) if e == "SessionStart")
     assert "plugin runtime" not in session
@@ -191,7 +214,9 @@ def test_no_claude_or_grok_public_file_carries_a_forbidden_token() -> None:
 
 def test_every_grok_hook_command_launches_the_pin() -> None:
     for event, matcher, command in _commands(_GROK_HOOKS):
-        if matcher == "Bash":
+        if _BRIEFING in command:
+            assert command == _briefing("grok")
+        elif matcher == "Bash":
             assert command == _bash_filter("grok"), command
         else:
             assert command == _expected("grok", event), (event, command)
@@ -211,7 +236,7 @@ def test_every_codex_hook_command_launches_the_pin_in_posix_and_powershell() -> 
             for group in groups:
                 for hook in group["hooks"]:
                     commands += [hook["command"], hook["commandWindows"]]
-    assert len(commands) == 6
+    assert len(commands) == 8
     for command in commands:
         # The offline launch, then the online one: each names the pin and the entry.
         assert f"{_LAUNCH} --offline sidegraph-" in command, command
@@ -220,7 +245,7 @@ def test_every_codex_hook_command_launches_the_pin_in_posix_and_powershell() -> 
         assert command.index("--offline") < command.index(f"{_LAUNCH} sidegraph-"), command
         _assert_no_forbidden(command, command[:60])
     posix = [c for c in commands if c.startswith("sh -c ")]
-    assert len(posix) == 3
+    assert len(posix) == 4
     for command in posix:
         assert "git rev-parse --show-toplevel" in command
 
@@ -395,6 +420,7 @@ def test_every_public_command_runs_the_pin_from_the_project_directory(
             "HOME": str(tmp_path / "home"),
             "CLAUDE_PROJECT_DIR": str(tmp_path / "elsewhere"),
             "STUB_LOG": str(tmp_path / "stub.log"),
+            "SIDEGRAPH_BRIEFING_PROTOCOL": "on",
         },
         capture_output=True,
         text=True,
@@ -412,7 +438,7 @@ def test_every_public_command_runs_the_pin_from_the_project_directory(
         "--python",
         "3.13",
         "--offline",
-        _ENTRY[event],
+        _BRIEFING if _BRIEFING in command else _ENTRY[event],
         "--repo-root",
     ]
     assert sum(line.startswith("@@host ") for line in lines) == 1
@@ -462,4 +488,5 @@ def test_t18_the_dev_hooks_keep_the_checkout_environment_and_do_not_cd(
     assert "UV_PROJECT_ENVIRONMENT=.venv" in command
     assert '--project "${CLAUDE_PLUGIN_ROOT}/../.."' in command
     assert "cd " not in command
-    assert f"{_ENTRY[event]} --repo-root" in command
+    entry = _BRIEFING if _BRIEFING in command else _ENTRY[event]
+    assert f"{entry} --repo-root" in command
