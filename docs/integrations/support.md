@@ -12,7 +12,7 @@ Use the setup page for your host, then [verify the installation](../guides/verif
 | [Codex view of the ChatGPT desktop app](desktop-apps.md#codex-view-of-the-chatgpt-desktop-app) | Yes | Yes | Hook | No | Hook | Interactive sessions | `commandWindows`; no Windows desktop run |
 | [Grok Build](grok.md) | Yes | Yes | MCP instructions | Yes | Task brief | Interactive sessions | POSIX commands |
 | [Muse](muse.md) | Yes | Yes | Hook | No | Hook | No | Not supported |
-| [Kimi Code](kimi.md) | Yes | Yes | No | No | No | No | Not supported |
+| [Kimi Code](kimi.md) | Manual `mcp.json` entry | Yes | No | No | No | No | Not supported |
 | [OpenCode V2](opencode.md) | Yes | Yes | No | No | No | No | See installation guide |
 
 Desktop cells come from macOS live runs with plugin 0.23.0: Code tab on 2026-10-31 and Codex view on 2026-11-02. The Codex run used a CLI-installed plugin and CLI-trusted hooks. See the [desktop guide](desktop-apps.md) for install and verification boundaries. Regular Claude chat, Cowork and ChatGPT Chat/Work are unsupported by Sidegraph.

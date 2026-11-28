@@ -201,8 +201,8 @@ hooks together. OpenCode V2 uses the
 [canonical Git package guide](../../.opencode/INSTALL.md).
 [Muse](../integrations/muse.md) supplies MCP, skills, the session map and a subagent brief,
 and must be restarted from the intended project when switching workspaces; expanded native
-acceptance is deferred. [Kimi Code](../integrations/kimi.md) supplies MCP and skills only and installs
-from the repository URL. Grok Build installs from its own plugin marketplace; see the
+acceptance is deferred. [Kimi Code](../integrations/kimi.md) gets the skills from the plugin, installed
+from the repository URL, and the MCP server from a manual `mcp.json` entry. Grok Build installs from its own plugin marketplace; see the
 [Grok Build guide](../integrations/grok.md).
 
 ### Option C — uvx from PyPI
@@ -254,7 +254,7 @@ deactivating the other venv first.
 ## Host plugins: install and update
 
 Each recipe below installs the plugin and gives the command that updates it. For Claude Code and
-Grok Build, Codex, Muse and Kimi Code the launch names the plugin's own version, so one plugin update
+Grok Build, Codex and Muse the launch names the plugin's own version, so one plugin update
 replaces the Sidegraph version together with the skills and manifests. OpenCode's package spec
 tracks `#main` and its MCP override names a version, so its package and its server update
 separately. Use your host's update recipe after a release, then start a new session.
@@ -267,7 +267,7 @@ separately. Use your host's update recipe after a release, then start a new sess
 | Codex view of the ChatGPT desktop app | yes: hooks trusted through the CLI in the verified route | macOS |
 | Grok Build | yes: hooks, capture reminders, context on reads; the session map through the MCP server | macOS |
 | Muse | partly: session map and subagent brief, after you approve them | macOS |
-| Kimi Code | no: MCP and skills | macOS |
+| Kimi Code | no: skills, and MCP added by hand | macOS |
 | OpenCode V2 | no: MCP and skills | macOS |
 
 ### Claude Code
@@ -389,11 +389,17 @@ Muse 1.4.14 on macOS; Windows is not checked. See the [Muse guide](../integratio
 
 ### Kimi Code
 
-MCP and shared skills; no hooks, so no session map, no context on reads and no capture
-reminder. In Kimi Code, run `/plugins`, choose **Custom** and enter
-`https://github.com/SantyagoSeaman/sidegraph`, then start a new session with `/new` from the
-intended project directory. Update from `/plugins` the same way. See the
-[Kimi Code guide](../integrations/kimi.md).
+Skills and MCP tools; no hooks, so no session map, no context on reads and no capture
+reminder. It takes two steps, because the plugin cannot bundle a working MCP server on Kimi:
+
+1. Add the `sidegraph` MCP server to your user `~/.kimi-code/mcp.json`. The
+   [Kimi Code guide](../integrations/kimi.md#1-add-the-mcp-server) has the entry to copy.
+2. In Kimi Code, run `/plugins`, choose **Custom** and enter
+   `https://github.com/SantyagoSeaman/sidegraph`. This installs the skills.
+
+Then start a new session with `/new` from the intended project directory and call
+`list_domains()`. The plugin and the `mcp.json` version
+[update separately](../integrations/kimi.md#updating).
 
 ### OpenCode V2
 

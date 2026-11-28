@@ -44,7 +44,7 @@ release time. The version bump writes it in each of these files, and
 |---|---|
 | `plugin/sidegraph/.mcp.public.json`, `plugin/sidegraph/hooks/hooks.public.json`, `plugin/sidegraph/grok/hooks.public.json`, `plugin/sidegraph/codex/mcp.public.json`, `plugin/sidegraph/codex/hooks.public.json` | Each command pins `sidegraph==X.Y.Z`. Each hook command pins both the offline launch and the online fallback. Codex has four pins per handler across POSIX and Windows, so its two SessionStart handlers have eight. Replace every pin. `tools/check_public_twins.py` fails if any differ. |
 | `plugin/sidegraph/.muse-plugin/plugin.json`, `plugin/sidegraph/muse/hook.py` | the MCP argv and `SOURCE` |
-| `.kimi-plugin/plugin.json` | the MCP `args` pin |
+| `docs/integrations/kimi.md` | the `args` pin in the `mcp.json` entry users copy (the Kimi manifest launches nothing) |
 | `index.js`, `.opencode/INSTALL.md` | `RUNTIME_SOURCE` and the MCP override. The OpenCode *package* spec `git+…#main` is not a launch of Sidegraph and stays |
 | `plugin/sidegraph/skills/*/SKILL.md` | every runner line of the ten skills that run a CLI |
 | `.github/ISSUE_TEMPLATE/bug_report.yml` | the `sidegraph-verify` command |

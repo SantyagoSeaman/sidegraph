@@ -16,7 +16,7 @@ Start with the task you have now. [llms.txt](llms.txt) is the flat index for an 
    [Codex](getting-started/codex-setup.md) or [Grok Build](integrations/grok.md), or the narrower
    paths for [OpenCode V2](../.opencode/INSTALL.md) (MCP and skills) and
    [Muse](integrations/muse.md) (MCP, skills, the session map and a subagent brief) and
-   [Kimi Code](integrations/kimi.md) (MCP and skills).
+   [Kimi Code](integrations/kimi.md) (skills, and MCP added by hand).
 4. Run the [four-case verification checklist](guides/verifying-your-setup.md).
 
 If the repository already has ADRs or specs, use the

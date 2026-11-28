@@ -1,11 +1,17 @@
-"""The Kimi Code manifest at the repository root: shared skills and the pinned MCP launch."""
+"""Kimi Code: the root manifest ships the skills, and the guide carries the MCP entry users add.
+
+The manifest declares no MCP server on purpose. Kimi Code starts a plugin's server in the
+plugin's own folder, so a bundled server cannot find the project's store.
+"""
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / ".kimi-plugin" / "plugin.json"
+GUIDE = ROOT / "docs" / "integrations" / "kimi.md"
 
 
 def _manifest() -> dict:
@@ -30,23 +36,29 @@ def test_kimi_points_at_the_shared_skills() -> None:
     assert list(skills_dir.glob("*/SKILL.md"))
 
 
-def test_kimi_mcp_launches_the_pin_without_a_shell() -> None:
-    """The server is an inline stdio entry on the exact PyPI pin, like every other host."""
-    servers = _manifest()["mcpServers"]
-    assert list(servers) == ["sidegraph"]
-    assert servers["sidegraph"] == {
-        "transport": "stdio",
-        "command": "uvx",
-        "args": [
-            f"--from=sidegraph=={_version()}",
-            "--python",
-            "3.13",
-            "sidegraph-mcp",
-            "--repo-root",
-        ],
+def test_kimi_manifest_declares_no_mcp_server_and_no_hooks() -> None:
+    """A bundled server would start in the plugin's folder and read no project's store."""
+    manifest = _manifest()
+    assert "mcpServers" not in manifest
+    assert "hooks" not in manifest
+
+
+def test_the_guide_entry_launches_the_pin_in_the_session_directory() -> None:
+    """The copied entry is the whole MCP setup. `cwd` or `env` would tie it to one project."""
+    blocks = re.findall(r"```json\n(.*?)```", GUIDE.read_text(encoding="utf-8"), re.DOTALL)
+    assert len(blocks) == 1
+    assert json.loads(blocks[0]) == {
+        "mcpServers": {
+            "sidegraph": {
+                "command": "uvx",
+                "args": [
+                    "--from",
+                    f"sidegraph=={_version()}",
+                    "--python",
+                    "3.13",
+                    "sidegraph-mcp",
+                    "--repo-root",
+                ],
+            }
+        }
     }
-
-
-def test_kimi_declares_no_hooks() -> None:
-    """Basic integration only: MCP and skills. A hook is advertised only once it is proved."""
-    assert "hooks" not in _manifest()

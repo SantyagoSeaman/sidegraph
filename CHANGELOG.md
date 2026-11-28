@@ -7,6 +7,16 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.36.1] — 2026-11-28
+
+### Fixed
+
+- **Kimi Code: the memory tools now reach the project's store.** The 0.36.0 plugin bundled the
+  MCP server, but Kimi Code starts a plugin's server in the plugin's own folder, so every tool
+  call answered `no store at …/.kimi-code/plugins/…`. The plugin now ships the skills only.
+  **Kimi users must add the MCP server to their user `mcp.json` by hand** and keep its version
+  up to date themselves. See the [Kimi Code guide](docs/integrations/kimi.md).
+
 ## [0.36.0] — 2026-11-27
 
 ### Added
@@ -3650,7 +3660,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.36.1...HEAD
+[0.36.1]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.36.0...v0.36.1
 [0.36.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.33.0...v0.34.0

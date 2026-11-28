@@ -147,7 +147,7 @@ time; the records are the source of truth.
 | [Codex view of the ChatGPT desktop app](docs/integrations/desktop-apps.md#codex-view-of-the-chatgpt-desktop-app) | Yes, macOS live run | Session map and subagent brief |
 | Grok Build | Yes | Session map through MCP, file records and task brief |
 | Muse | Yes | Session map and subagent brief |
-| Kimi Code | Yes | Call the tools explicitly |
+| [Kimi Code](docs/integrations/kimi.md) | Yes, with the MCP server added by hand | Call the tools explicitly |
 | OpenCode V2 | Yes | Call the tools explicitly |
 
 See the [host feature matrix](docs/integrations/support.md) for capture reminders, Windows wiring and setup links. The [desktop guide](docs/integrations/desktop-apps.md) gives the verified install paths and per-surface boundaries. Desktop live runs cover macOS.
