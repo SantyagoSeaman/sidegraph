@@ -32,7 +32,7 @@
 # and three receipts exceed the 1 MiB large-file cap. Prose files outside those directories
 # (the session recap, the index, the plan) are still linted. The corpus leak gate and gitleaks
 # still scan the packages.
-exclude: '^(\.sidegraph/|src/sidegraph/viz/assets/|src/sidegraph/portal/static/vendor/|sidegraph-graph\.html|(design|docs)/whitepaper/evidence/artifact-bundle/|design/reviews/2026-11-0[67]-[^/]+/)'
+exclude: '^(\.sidegraph/|src/sidegraph/viz/assets/|src/sidegraph/portal/static/vendor/|sidegraph-graph\.html|(design|docs)/whitepaper/evidence/artifact-bundle/|design/reviews/2026-11-0[67]-[^/]+/|design/testing/benches/traps/runs/)'
 
 # A plain `pre-commit install` (no --hook-types flag) wires up BOTH the pre-commit stage and
 # the commit-msg stage below, so the `no-session-links` hook actually runs for a contributor

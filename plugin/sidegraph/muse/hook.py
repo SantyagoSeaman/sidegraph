@@ -21,7 +21,7 @@ import time
 
 # The exact PyPI pin the adapter launches: the version bump writes it, with the manifests. The
 # interpreter flag follows the package, as in every other host's launch.
-SOURCE = "sidegraph==0.35.0"
+SOURCE = "sidegraph==0.36.0"
 
 # Muse's ``timeoutMs`` per event, pinned to the manifest by a test. The child gets the rest of
 # the budget minus the margin, so a slow runtime ends as ``{}`` and not as a Muse ``timed_out``.

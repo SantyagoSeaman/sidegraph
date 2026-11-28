@@ -47,7 +47,7 @@ creates the repo-committed `.sidegraph/` record directories and a gitignored der
 
 Run `sidegraph-init` from the repository root before starting your host session. On Claude Code and Codex, without a
 store, SessionStart shows setup guidance and Stop stays silent; neither creates one.
-OpenCode uses explicit MCP calls instead of lifecycle hooks, and Muse has no `Stop` hook. On
+OpenCode and Kimi Code use explicit MCP calls instead of lifecycle hooks, and Muse has no `Stop` hook. On
 Grok Build the setup guidance appears only in Grok's own interface, not to the agent. If an
 older hook already left an empty store, init identifies it as empty and prints setup guidance.
 
@@ -101,6 +101,7 @@ Start a new interactive session in the repository and review its approval prompt
 hooks require explicit trust through the startup warning or `/hooks`. For OpenCode V2, use
 the [native Git installation guide](../../.opencode/INSTALL.md); for
 Muse, use the [Muse guide](../integrations/muse.md) and start its process in this project; for
+Kimi Code, use the [Kimi Code guide](../integrations/kimi.md); for
 Grok Build, use the [Grok Build guide](../integrations/grok.md).
 The [host plugin recipes](installation.md#host-plugins-install-and-update) describe installation and updates. For a
 manual or source-checkout setup, use the host-specific page:

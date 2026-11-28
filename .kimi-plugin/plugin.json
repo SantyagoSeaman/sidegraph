@@ -1,0 +1,24 @@
+{
+  "name": "sidegraph",
+  "version": "0.36.0",
+  "description": "The project's decision graph for AI coding agents: decisions, rejected alternatives and gotchas, anchored to your code.",
+  "homepage": "https://github.com/SantyagoSeaman/sidegraph",
+  "license": "Apache-2.0",
+  "skills": "./plugin/sidegraph/skills/",
+  "mcpServers": {
+    "sidegraph": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from=sidegraph==0.36.0",
+        "--python",
+        "3.13",
+        "sidegraph-mcp",
+        "--repo-root"
+      ]
+    }
+  },
+  "interface": {
+    "displayName": "Sidegraph"
+  }
+}

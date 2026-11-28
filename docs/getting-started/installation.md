@@ -23,8 +23,8 @@ the store, the session map and listings still work, but new concrete anchors rem
 - For automatic session integration: [Claude Code](claude-code-setup.md),
   [Codex](codex-setup.md) or [Grok Build](../integrations/grok.md).
   [OpenCode V2](../../.opencode/INSTALL.md) provides MCP tools and shared skills without
-  lifecycle hooks; [Muse](../integrations/muse.md) adds the session map and a
-  subagent brief through two hooks.
+  lifecycle hooks, as does [Kimi Code](../integrations/kimi.md); [Muse](../integrations/muse.md)
+  adds the session map and a subagent brief through two hooks.
   Other stdio MCP clients can call the tools directly; the CLI also works without a host.
 
 See [Platform coverage](#platform-coverage) for the operating system matrix and its CI scope.
@@ -201,7 +201,8 @@ hooks together. OpenCode V2 uses the
 [canonical Git package guide](../../.opencode/INSTALL.md).
 [Muse](../integrations/muse.md) supplies MCP, skills, the session map and a subagent brief,
 and must be restarted from the intended project when switching workspaces; expanded native
-acceptance is deferred. Grok Build installs from its own plugin marketplace; see the
+acceptance is deferred. [Kimi Code](../integrations/kimi.md) supplies MCP and skills only and installs
+from the repository URL. Grok Build installs from its own plugin marketplace; see the
 [Grok Build guide](../integrations/grok.md).
 
 ### Option C — uvx from PyPI
@@ -253,7 +254,7 @@ deactivating the other venv first.
 ## Host plugins: install and update
 
 Each recipe below installs the plugin and gives the command that updates it. For Claude Code and
-Grok Build, Codex and Muse the launch names the plugin's own version, so one plugin update
+Grok Build, Codex, Muse and Kimi Code the launch names the plugin's own version, so one plugin update
 replaces the Sidegraph version together with the skills and manifests. OpenCode's package spec
 tracks `#main` and its MCP override names a version, so its package and its server update
 separately. Use your host's update recipe after a release, then start a new session.
@@ -266,6 +267,7 @@ separately. Use your host's update recipe after a release, then start a new sess
 | Codex view of the ChatGPT desktop app | yes: hooks trusted through the CLI in the verified route | macOS |
 | Grok Build | yes: hooks, capture reminders, context on reads; the session map through the MCP server | macOS |
 | Muse | partly: session map and subagent brief, after you approve them | macOS |
+| Kimi Code | no: MCP and skills | macOS |
 | OpenCode V2 | no: MCP and skills | macOS |
 
 ### Claude Code
@@ -384,6 +386,14 @@ muse plugins approve sidegraph
 
 Installation, update, MCP approval, the session map and the subagent brief were checked on
 Muse 1.4.14 on macOS; Windows is not checked. See the [Muse guide](../integrations/muse.md).
+
+### Kimi Code
+
+MCP and shared skills; no hooks, so no session map, no context on reads and no capture
+reminder. In Kimi Code, run `/plugins`, choose **Custom** and enter
+`https://github.com/SantyagoSeaman/sidegraph`, then start a new session with `/new` from the
+intended project directory. Update from `/plugins` the same way. See the
+[Kimi Code guide](../integrations/kimi.md).
 
 ### OpenCode V2
 
@@ -577,7 +587,7 @@ above, including a Windows 3.14 cell with PowerShell 7 unavailable for preflight
 real host sessions. Windows 3.13 retains PowerShell 7; its launcher checks also cover 5.1.
 Stable publication of 0.14.0 required the full gate to pass without a known-issue exception.
 The README's badges show the latest workflow run and release, not support for every
-published version. Muse, OpenCode and Grok Build have the narrower
+published version. Muse, Kimi Code, OpenCode and Grok Build have the narrower
 coverage in their installation guides and are outside this native matrix.
 
 On native Windows, the Claude Code hooks run through Git Bash, which comes with Git for

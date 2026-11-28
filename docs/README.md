@@ -15,7 +15,8 @@ Start with the task you have now. [llms.txt](llms.txt) is the flat index for an 
 3. For desktop coding, use the [desktop guide](integrations/desktop-apps.md). Use the recommended host path for [Claude Code](getting-started/claude-code-setup.md),
    [Codex](getting-started/codex-setup.md) or [Grok Build](integrations/grok.md), or the narrower
    paths for [OpenCode V2](../.opencode/INSTALL.md) (MCP and skills) and
-   [Muse](integrations/muse.md) (MCP, skills, the session map and a subagent brief).
+   [Muse](integrations/muse.md) (MCP, skills, the session map and a subagent brief) and
+   [Kimi Code](integrations/kimi.md) (MCP and skills).
 4. Run the [four-case verification checklist](guides/verifying-your-setup.md).
 
 If the repository already has ADRs or specs, use the
@@ -73,4 +74,4 @@ it is optional background on evidence, limits, and repository fit.
 - [Privacy](privacy.md)
 - Integrations: [Desktop coding surfaces](integrations/desktop-apps.md), [Claude Code](integrations/claude-code.md),
   [Codex](integrations/codex.md), [OpenCode V2](integrations/opencode.md),
-  [Muse](integrations/muse.md), [Grok Build](integrations/grok.md), [Graphify](integrations/graphify.md)
+  [Muse](integrations/muse.md), [Kimi Code](integrations/kimi.md), [Grok Build](integrations/grok.md), [Graphify](integrations/graphify.md)

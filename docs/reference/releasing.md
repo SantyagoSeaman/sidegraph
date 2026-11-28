@@ -30,6 +30,7 @@ restate it in prose or carry it in a manifest field.
 | `plugin/sidegraph/.codex-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
 | `plugin/sidegraph/.muse-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
 | `plugin/sidegraph/.grok-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
+| `.kimi-plugin/plugin.json` | `version` field, kept in lockstep with `pyproject.toml` |
 | `package.json` | OpenCode Git package's `version`, kept in lockstep with `pyproject.toml` |
 | `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | Update any `plugins[]` entry's `version` if that optional field is present; leave it omitted otherwise |
 
@@ -43,6 +44,7 @@ release time. The version bump writes it in each of these files, and
 |---|---|
 | `plugin/sidegraph/.mcp.public.json`, `plugin/sidegraph/hooks/hooks.public.json`, `plugin/sidegraph/grok/hooks.public.json`, `plugin/sidegraph/codex/mcp.public.json`, `plugin/sidegraph/codex/hooks.public.json` | Each command pins `sidegraph==X.Y.Z`. Each hook command pins both the offline launch and the online fallback. Codex has four pins per handler across POSIX and Windows, so its two SessionStart handlers have eight. Replace every pin. `tools/check_public_twins.py` fails if any differ. |
 | `plugin/sidegraph/.muse-plugin/plugin.json`, `plugin/sidegraph/muse/hook.py` | the MCP argv and `SOURCE` |
+| `.kimi-plugin/plugin.json` | the MCP `args` pin |
 | `index.js`, `.opencode/INSTALL.md` | `RUNTIME_SOURCE` and the MCP override. The OpenCode *package* spec `git+…#main` is not a launch of Sidegraph and stays |
 | `plugin/sidegraph/skills/*/SKILL.md` | every runner line of the ten skills that run a CLI |
 | `.github/ISSUE_TEMPLATE/bug_report.yml` | the `sidegraph-verify` command |

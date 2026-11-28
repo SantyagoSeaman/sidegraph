@@ -42,7 +42,8 @@ If this fails, compare the resolved paths with
 [Configuration](../reference/configuration.md#store-path-resolution) and the relevant host
 page: [Claude Code](../getting-started/claude-code-setup.md),
 [Codex](../getting-started/codex-setup.md), [Grok Build](../integrations/grok.md) or
-[Muse](../integrations/muse.md) or [OpenCode](../integrations/opencode.md).
+[Muse](../integrations/muse.md), [Kimi Code](../integrations/kimi.md) or
+[OpenCode](../integrations/opencode.md).
 
 ## Case 2 — Durable capture and retrieval
 

@@ -80,7 +80,7 @@ established by core/installed-wheel CI; the native Windows route is verified wit
 
 ## The plugin's first start
 
-Every plugin (Claude Code, Grok Build, Codex, Muse and OpenCode's MCP server) launches the
+Every plugin (Claude Code, Grok Build, Codex, Muse, Kimi Code and OpenCode's MCP server) launches the
 published package at the plugin's own version, `uvx --from sidegraph==X.Y.Z --python 3.13
 <entry point>`, and that package pins its dependencies. Nothing floats between sessions. What can
 go wrong is the first start after each plugin update, or the environment that start needs. When a

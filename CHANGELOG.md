@@ -7,6 +7,16 @@ interfaces, exactly, and what each one promises: [`docs/reference/stability.md`]
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-11-27
+
+### Added
+
+- **Kimi Code plugin.** The repository root carries a Kimi manifest, so `/plugins` → Custom with
+  `https://github.com/SantyagoSeaman/sidegraph` installs the decision MCP server (the exact
+  PyPI pin, like every host) and the shared skills. There are no hooks: no session map, no
+  records on reads, no subagent brief and no capture reminder. See the
+  [Kimi Code guide](docs/integrations/kimi.md).
+
 ## [0.35.0] — 2026-11-25
 
 ### Added
@@ -3640,7 +3650,8 @@ First public release.
   not claim that task-aware delivery causes better engineering outcomes or beats a baseline;
   that would need a controlled campaign that has not been run.
 
-[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/SantyagoSeaman/sidegraph/compare/v0.32.0...v0.33.0

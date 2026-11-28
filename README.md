@@ -13,7 +13,7 @@ separate documentation step: the decisions, the facts behind them and the links 
 Any agent working on the project finds them later, weeks or years on, at the code they
 concern.
 
-Sidegraph runs as a plugin for Claude Code, Codex, Grok Build, OpenCode and Muse, and as an
+Sidegraph runs as a plugin for Claude Code, Codex, Grok Build, OpenCode, Muse and Kimi Code, and as an
 MCP server for any other client.
 
 [Quickstart](#quickstart) · [Documentation](docs/README.md) · [Whitepaper](docs/whitepaper/index.md) · [Changelog](CHANGELOG.md)
@@ -147,6 +147,7 @@ time; the records are the source of truth.
 | [Codex view of the ChatGPT desktop app](docs/integrations/desktop-apps.md#codex-view-of-the-chatgpt-desktop-app) | Yes, macOS live run | Session map and subagent brief |
 | Grok Build | Yes | Session map through MCP, file records and task brief |
 | Muse | Yes | Session map and subagent brief |
+| Kimi Code | Yes | Call the tools explicitly |
 | OpenCode V2 | Yes | Call the tools explicitly |
 
 See the [host feature matrix](docs/integrations/support.md) for capture reminders, Windows wiring and setup links. The [desktop guide](docs/integrations/desktop-apps.md) gives the verified install paths and per-surface boundaries. Desktop live runs cover macOS.
@@ -171,6 +172,7 @@ Other agents:
 [Codex](docs/getting-started/installation.md#codex) ·
 [Grok Build](docs/getting-started/installation.md#grok-build) ·
 [Muse](docs/getting-started/installation.md#muse) ·
+[Kimi Code](docs/getting-started/installation.md#kimi-code) ·
 [OpenCode](docs/getting-started/installation.md#opencode-v2) ·
 [any MCP client](docs/getting-started/installation.md#any-mcp-client).
 
